@@ -1,0 +1,62 @@
+# Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache & build
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Secrets & Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Workspace data, databases, and media downloads
+workspace_api/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+
+# Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Large media outputs
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
+*.wav
+*.mp3
+*.flac
+*.zip
+*.tar.gz

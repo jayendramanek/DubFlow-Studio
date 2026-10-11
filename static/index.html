@@ -1,0 +1,3688 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DubFlow Studio - Universal AI Video Dubbing & Localization</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0f9ff',
+              100: '#e0f2fe',
+              200: '#bae6fd',
+              300: '#7dd3fc',
+              400: '#38bdf8',
+              500: '#0ea5e9',
+              600: '#0284c7',
+              700: '#0369a1',
+            },
+            accent: {
+              cyan: '#06b6d4',
+              indigo: '#6366f1',
+              violet: '#8b5cf6',
+              emerald: '#10b981',
+            },
+            surface: {
+              750: '#222838',
+              800: '#1a1f2e',
+              850: '#131722',
+              900: '#0d1017',
+              950: '#07080c',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <!-- React 18 & Babel Standalone for native JSX execution -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 0 18px rgba(14, 165, 233, 0.35); }
+      50% { box-shadow: 0 0 30px rgba(99, 102, 241, 0.55); }
+    }
+    .glowing-btn:hover { animation: pulse-glow 2s infinite; }
+    .glass-card {
+      background: rgba(19, 23, 34, 0.82);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .glass-panel {
+      background: rgba(13, 16, 23, 0.72);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .glass-panel {
+      background: rgba(19, 21, 27, 0.7);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0b0c10;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #272a37;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #3b3f52;
+    }
+  </style>
+</head>
+<body class="bg-surface-950 text-slate-100 min-h-screen font-sans selection:bg-brand-500 selection:text-white antialiased">
+  <div id="root"></div>
+
+  <script>
+    // Injected environment configuration fallback
+    window.ENV = {
+      VITE_ADMIN_EMAIL: "admin@admin.com",
+      VITE_ADMIN_PASSWORD: "admin@1994"
+    };
+  </script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // Supported Dubbing Languages Metadata
+    const LANGUAGES = [
+      {
+        code: "es",
+        name: "Spanish",
+        flag: "🇪🇸",
+        native: "Español",
+        badge: "EN ESPAÑOL",
+        color: "#f97316",
+        voices: [
+          { id: "es-ES-AlvaroNeural", name: "Alvaro (Spain - Dramatic)", gender: "male", desc: "Recap narrator" },
+          { id: "es-MX-JorgeNeural", name: "Jorge (Mexico - Energetic)", gender: "male", desc: "Action narrator" },
+          { id: "es-ES-ElviraNeural", name: "Elvira (Spain - Expressive)", gender: "female", desc: "Clear & serious" },
+          { id: "es-MX-DaliaNeural", name: "Dalia (Mexico - Smooth)", gender: "female", desc: "Natural tone" },
+        ]
+      },
+      {
+        code: "ta",
+        name: "Tamil",
+        flag: "🇮🇳",
+        native: "தமிழ்",
+        badge: "TAMIL RECAP",
+        color: "#10b981",
+        voices: [
+          { id: "ta-IN-ValluvarNeural", name: "Valluvar (India - Dramatic)", gender: "male", desc: "Powerful narrator" },
+          { id: "ta-IN-PallaviNeural", name: "Pallavi (India - Expressive)", gender: "female", desc: "Smooth storytelling" },
+        ]
+      },
+      {
+        code: "te",
+        name: "Telugu",
+        flag: "🇮🇳",
+        native: "తెలుగు",
+        badge: "TELUGU RECAP",
+        color: "#06b6d4",
+        voices: [
+          { id: "te-IN-MohanNeural", name: "Mohan (India - Energetic)", gender: "male", desc: "Recap narrator" },
+          { id: "te-IN-ShrutiNeural", name: "Shruti (India - Smooth)", gender: "female", desc: "Natural tone" },
+        ]
+      },
+      {
+        code: "bn",
+        name: "Bengali",
+        flag: "🇮🇳",
+        native: "বাংলা",
+        badge: "BENGALI RECAP",
+        color: "#3b82f6",
+        voices: [
+          { id: "bn-IN-BashkarNeural", name: "Bashkar (India - Dramatic)", gender: "male", desc: "Storytelling tone" },
+          { id: "bn-BD-PradeepNeural", name: "Pradeep (Bangladesh - Dhaka)", gender: "male", desc: "Natural recap tone" },
+          { id: "bn-IN-TanishaaNeural", name: "Tanishaa (India - Expressive)", gender: "female", desc: "Smooth narrator" },
+        ]
+      },
+      {
+        code: "hi",
+        name: "Hindi",
+        flag: "🇮🇳",
+        native: "हिन्दी",
+        badge: "HINDI RECAP",
+        color: "#ec4899",
+        voices: [
+          { id: "hi-IN-MadhurNeural", name: "Madhur (India - Cinematic)", gender: "male", desc: "Deep narrator" },
+          { id: "hi-IN-SwaraNeural", name: "Swara (India - Professional)", gender: "female", desc: "Clear voice" },
+        ]
+      },
+      {
+        code: "kn",
+        name: "Kannada",
+        flag: "🇮🇳",
+        native: "ಕನ್ನಡ",
+        badge: "KANNADA RECAP",
+        color: "#8b5cf6",
+        voices: [
+          { id: "kn-IN-GaganNeural", name: "Gagan (India - Storyteller)", gender: "male", desc: "Clear narrator" },
+          { id: "kn-IN-SapnaNeural", name: "Sapna (India - Expressive)", gender: "female", desc: "Storytelling tone" },
+        ]
+      },
+      {
+        code: "ml",
+        name: "Malayalam",
+        flag: "🇮🇳",
+        native: "മലയാളം",
+        badge: "MALAYALAM RECAP",
+        color: "#14b8a6",
+        voices: [
+          { id: "ml-IN-MidhunNeural", name: "Midhun (India - Cinematic)", gender: "male", desc: "Calm voice" },
+          { id: "ml-IN-SobhanaNeural", name: "Sobhana (India - Smooth)", gender: "female", desc: "Narrative tone" },
+        ]
+      },
+      {
+        code: "mr",
+        name: "Marathi",
+        flag: "🇮🇳",
+        native: "मराठी",
+        badge: "MARATHI RECAP",
+        color: "#f59e0b",
+        voices: [
+          { id: "mr-IN-ManoharNeural", name: "Manohar (India - Expressive)", gender: "male", desc: "Dramatic tone" },
+          { id: "mr-IN-AarohiNeural", name: "Aarohi (India - Clear)", gender: "female", desc: "Smooth narrative" },
+        ]
+      },
+      {
+        code: "id",
+        name: "Indonesian",
+        flag: "🇮🇩",
+        native: "Bahasa",
+        badge: "BAHASA INDONESIA",
+        color: "#ef4444",
+        voices: [
+          { id: "id-ID-ArdiNeural", name: "Ardi (Indonesia - Alur Cerita)", gender: "male", desc: "Manhwa recap narrator" },
+          { id: "id-ID-GadisNeural", name: "Gadis (Indonesia - Smooth)", gender: "female", desc: "Natural narration" },
+        ]
+      },
+      {
+        code: "pt",
+        name: "Portuguese",
+        flag: "🇧🇷",
+        native: "Português",
+        badge: "EM PORTUGUÊS",
+        color: "#22c55e",
+        voices: [
+          { id: "pt-BR-AntonioNeural", name: "Antonio (Brazil - Resumo)", gender: "male", desc: "Manhwa narrator" },
+          { id: "pt-BR-FranciscaNeural", name: "Francisca (Brazil - Expressive)", gender: "female", desc: "Expressive voice" },
+        ]
+      },
+      {
+        code: "fr",
+        name: "French",
+        flag: "🇫🇷",
+        native: "Français",
+        badge: "EN FRANÇAIS",
+        color: "#6366f1",
+        voices: [
+          { id: "fr-FR-HenriNeural", name: "Henri (France - Cinematic)", gender: "male", desc: "Serious narrator" },
+          { id: "fr-FR-DeniseNeural", name: "Denise (France - Expressive)", gender: "female", desc: "Engaging voice" },
+        ]
+      },
+      {
+        code: "vi",
+        name: "Vietnamese",
+        flag: "🇻🇳",
+        native: "Tiếng Việt",
+        badge: "THUYẾT MINH",
+        color: "#e11d48",
+        voices: [
+          { id: "vi-VN-NamMinhNeural", name: "Nam Minh (Vietnam - Review)", gender: "male", desc: "Recap storyteller" },
+          { id: "vi-VN-HoaiMyNeural", name: "Hoài My (Vietnam - Expressive)", gender: "female", desc: "Clear tone" },
+        ]
+      },
+      {
+        code: "ar",
+        name: "Arabic",
+        flag: "🇸🇦",
+        native: "العربية",
+        badge: "بالعربية",
+        color: "#d97706",
+        voices: [
+          { id: "ar-SA-HamedNeural", name: "Hamed (Saudi Arabia - Dramatic)", gender: "male", desc: "Deep narrator" },
+          { id: "ar-EG-SalmaNeural", name: "Salma (Egypt - Storyteller)", gender: "female", desc: "Expressive voice" },
+        ]
+      },
+      {
+        code: "de",
+        name: "German",
+        flag: "🇩🇪",
+        native: "Deutsch",
+        badge: "AUF DEUTSCH",
+        color: "#eab308",
+        voices: [
+          { id: "de-DE-ConradNeural", name: "Conrad (Germany - Deep)", gender: "male", desc: "Anime recap narrator" },
+          { id: "de-DE-KatjaNeural", name: "Katja (Germany - Clear)", gender: "female", desc: "Storytelling tone" },
+        ]
+      },
+      {
+        code: "ru",
+        name: "Russian",
+        flag: "🇷🇺",
+        native: "Русский",
+        badge: "НА РУССКОМ",
+        color: "#0284c7",
+        voices: [
+          { id: "ru-RU-DmitryNeural", name: "Dmitry (Russia - Dramatic)", gender: "male", desc: "Manhwa recap voice" },
+          { id: "ru-RU-SvetlanaNeural", name: "Svetlana (Russia - Emotional)", gender: "female", desc: "Expressive narrator" },
+        ]
+      },
+      {
+        code: "ja",
+        name: "Japanese",
+        flag: "🇯🇵",
+        native: "日本語",
+        badge: "日本語吹き替え",
+        color: "#f43f5e",
+        voices: [
+          { id: "ja-JP-KeitaNeural", name: "Keita (Japan - Anime)", gender: "male", desc: "Anime style male" },
+          { id: "ja-JP-NanamiNeural", name: "Nanami (Japan - Anime)", gender: "female", desc: "Expressive voice" },
+        ]
+      }
+    ];
+
+    // Helper map for language code -> metadata
+    const LANG_MAP = LANGUAGES.reduce((acc, l) => ({ ...acc, [l.code]: l }), {});
+
+    // SVG Icons
+    const Icons = {
+      Dashboard: () => (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+        </svg>
+      ),
+      Videos: () => (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+        </svg>
+      ),
+      Plus: () => (
+        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
+        </svg>
+      ),
+      ExternalLink: () => (
+        <svg className="w-3.5 h-3.5 inline ml-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+        </svg>
+      ),
+      Youtube: () => (
+        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+        </svg>
+      ),
+      Scissors: () => (
+        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879a3 3 0 11-4.242-4.242 3 3 0 014.242 0L12 12zm0 0L9.121 9.121a3 3 0 10-4.242 4.242 3 3 0 004.242 0L12 12z" />
+        </svg>
+      ),
+      Edit: () => (
+        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+        </svg>
+      ),
+      Details: () => (
+        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      ),
+      Trash: () => (
+        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+        </svg>
+      ),
+      Refresh: () => (
+        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+      ),
+      Logout: () => (
+        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+        </svg>
+      ),
+      Play: () => (
+        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M8 5v14l11-7z" />
+        </svg>
+      ),
+      Download: () => (
+        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+        </svg>
+      ),
+      Lock: () => (
+        <svg className="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+        </svg>
+      ),
+      Mail: () => (
+        <svg className="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 12a4 4 0 10-8 0 4 4 0 008 0zm0 0v1.5a2.5 2.5 0 005 0V12a9 9 0 10-9 9m4.5-1.206a8.959 8.959 0 01-4.5 1.207" />
+        </svg>
+      ),
+      Eye: () => (
+        <svg className="w-5 h-5 text-gray-400 hover:text-gray-200 cursor-pointer" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+        </svg>
+      ),
+      EyeOff: () => (
+        <svg className="w-5 h-5 text-gray-400 hover:text-gray-200 cursor-pointer" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+        </svg>
+      ),
+      ArrowLeft: () => (
+        <svg className="w-4 h-4 mr-1 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+        </svg>
+      )
+    };
+
+    // =========================================================================
+    // Interactive SVG Pie / Donut Chart for Languages
+    // =========================================================================
+    function LanguagePieChart({ data = {}, size = 260 }) {
+      const entries = Object.entries(data).map(([code, count]) => {
+        const meta = LANG_MAP[code] || { name: code.toUpperCase(), flag: "🌐", color: "#6366f1" };
+        return {
+          code,
+          name: meta.name,
+          flag: meta.flag,
+          color: meta.color || "#6366f1",
+          value: count
+        };
+      }).sort((a, b) => b.value - a.value);
+
+      const total = entries.reduce((s, e) => s + e.value, 0);
+
+      const [hoveredSlice, setHoveredSlice] = useState(null);
+
+      if (total === 0 || entries.length === 0) {
+        return (
+          <div className="flex flex-col items-center justify-center h-64 text-gray-500">
+            <p>No video conversions recorded yet.</p>
+          </div>
+        );
+      }
+
+      const innerRadius = 60;
+      const outerRadius = 95;
+      const cx = size / 2;
+      const cy = size / 2;
+
+      let currentAngle = 0;
+      const slices = entries.map((entry, index) => {
+        const fraction = entry.value / total;
+        const angle = fraction * 2 * Math.PI;
+        const startAngle = currentAngle;
+        const endAngle = currentAngle + angle;
+        currentAngle += angle;
+
+        const x1 = cx + outerRadius * Math.cos(startAngle - Math.PI / 2);
+        const y1 = cy + outerRadius * Math.sin(startAngle - Math.PI / 2);
+        const x2 = cx + outerRadius * Math.cos(endAngle - Math.PI / 2);
+        const y2 = cy + outerRadius * Math.sin(endAngle - Math.PI / 2);
+
+        const x3 = cx + innerRadius * Math.cos(endAngle - Math.PI / 2);
+        const y3 = cy + innerRadius * Math.sin(endAngle - Math.PI / 2);
+        const x4 = cx + innerRadius * Math.cos(startAngle - Math.PI / 2);
+        const y4 = cy + innerRadius * Math.sin(startAngle - Math.PI / 2);
+
+        const largeArc = fraction > 0.5 ? 1 : 0;
+        const pathData = `
+          M ${x1} ${y1}
+          A ${outerRadius} ${outerRadius} 0 ${largeArc} 1 ${x2} ${y2}
+          L ${x3} ${y3}
+          A ${innerRadius} ${innerRadius} 0 ${largeArc} 0 ${x4} ${y4}
+          Z
+        `;
+
+        return {
+          ...entry,
+          pathData,
+          percentage: Math.round(fraction * 100)
+        };
+      });
+
+      return (
+        <div className="flex flex-col sm:flex-row items-center gap-6 justify-center">
+          <div className="relative flex items-center justify-center">
+            <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+              {slices.map((slice, idx) => (
+                <path
+                  key={slice.code}
+                  d={slice.pathData}
+                  fill={slice.color}
+                  stroke="#13151b"
+                  strokeWidth="3"
+                  className="transition-transform duration-200 cursor-pointer hover:opacity-90"
+                  onMouseEnter={() => setHoveredSlice(slice)}
+                  onMouseLeave={() => setHoveredSlice(null)}
+                />
+              ))}
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+              {hoveredSlice ? (
+                <>
+                  <span className="text-xl">{hoveredSlice.flag}</span>
+                  <span className="text-xs font-semibold text-slate-300">{hoveredSlice.name}</span>
+                  <span className="text-sm font-bold text-white">{hoveredSlice.value} vids ({hoveredSlice.percentage}%)</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Total</span>
+                  <span className="text-2xl font-black text-white">{total}</span>
+                  <span className="text-[10px] text-gray-400">Conversions</span>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-2 text-xs w-full sm:w-48">
+            {slices.map(s => (
+              <div
+                key={s.code}
+                onMouseEnter={() => setHoveredSlice(s)}
+                onMouseLeave={() => setHoveredSlice(null)}
+                className={`flex items-center justify-between p-1.5 rounded-lg transition cursor-pointer ${hoveredSlice?.code === s.code ? 'bg-surface-800' : 'hover:bg-surface-850'}`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }}></span>
+                  <span>{s.flag}</span>
+                  <span className="font-medium text-slate-200">{s.name}</span>
+                </div>
+                <span className="font-bold text-slate-400">{s.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Apple Silicon Unified Memory RAM Donut Chart
+    // =========================================================================
+    function RamDonutChart({ ram = { percent: 0, used_gb: 0, free_gb: 0, total_gb: 0 }, onRefresh }) {
+      const radius = 80;
+      const strokeWidth = 20;
+      const circumference = 2 * Math.PI * radius;
+      const percent = Math.min(100, Math.max(0, ram.percent || 0));
+      const strokeDashoffset = circumference - (percent / 100) * circumference;
+
+      return (
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-6">
+          <div className="relative flex items-center justify-center">
+            <svg width="220" height="220" viewBox="0 0 220 220" className="transform -rotate-90">
+              <circle
+                cx="110"
+                cy="110"
+                r={radius}
+                stroke="#1e212b"
+                strokeWidth={strokeWidth}
+                fill="transparent"
+              />
+              <circle
+                cx="110"
+                cy="110"
+                r={radius}
+                stroke="url(#ramGrad)"
+                strokeWidth={strokeWidth}
+                fill="transparent"
+                strokeDasharray={circumference}
+                strokeDashoffset={strokeDashoffset}
+                strokeLinecap="round"
+                className="transition-all duration-1000 ease-out"
+              />
+              <defs>
+                <linearGradient id="ramGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#06b6d4" />
+                  <stop offset="50%" stopColor="#0ea5e9" />
+                  <stop offset="100%" stopColor="#6366f1" />
+                </linearGradient>
+              </defs>
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+              <span className="text-3xl font-black text-white">{percent}%</span>
+              <span className="text-[11px] text-cyan-400 font-semibold tracking-wider uppercase">RAM Used</span>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 text-xs w-full sm:w-44">
+            <div className="p-2.5 rounded-lg bg-surface-850 border border-white/5">
+              <div className="text-gray-400">Used Memory</div>
+              <div className="text-base font-bold text-indigo-300">{ram.used_gb} GB</div>
+            </div>
+            <div className="p-2.5 rounded-lg bg-surface-850 border border-white/5">
+              <div className="text-gray-400">Free / Available</div>
+              <div className="text-base font-bold text-emerald-400">{ram.free_gb} GB</div>
+            </div>
+            <div className="flex items-center justify-between text-gray-400 px-1">
+              <span>Total Unified:</span>
+              <span className="font-bold text-white">{ram.total_gb} GB</span>
+            </div>
+            {onRefresh && (
+              <button
+                type="button"
+                onClick={onRefresh}
+                className="flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 font-medium transition"
+              >
+                <Icons.Refresh />
+                <span>Refresh RAM</span>
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Login Screen
+    // =========================================================================
+    function LoginScreen({ onLoginSuccess }) {
+      const [email, setEmail] = useState("admin@admin.com");
+      const [password, setPassword] = useState("admin@1994");
+      const [showPassword, setShowPassword] = useState(false);
+      const [error, setError] = useState("");
+      const [isSubmitting, setIsSubmitting] = useState(false);
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        setError("");
+        setIsSubmitting(true);
+
+        const expectedEmail = window.ENV?.VITE_ADMIN_EMAIL || "admin@admin.com";
+        const expectedPassword = window.ENV?.VITE_ADMIN_PASSWORD || "admin@1994";
+
+        setTimeout(() => {
+          if (email.trim().toLowerCase() === expectedEmail.toLowerCase() && password === expectedPassword) {
+            localStorage.setItem("admin_auth", "true");
+            localStorage.setItem("admin_user", JSON.stringify({ email: email.trim(), role: "Super Admin" }));
+            onLoginSuccess();
+          } else {
+            setError("Invalid email or password. Please check your credentials.");
+          }
+          setIsSubmitting(false);
+        }, 400);
+      };
+
+      const handleQuickFill = () => {
+        setEmail("admin@admin.com");
+        setPassword("admin@1994");
+        setError("");
+      };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden bg-surface-950">
+          {/* Ambient Glows */}
+          <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-brand-500/15 rounded-full blur-3xl pointer-events-none"></div>
+          <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+          <div className="w-full max-w-md glass-card rounded-2xl p-8 shadow-2xl relative z-10 border border-white/10">
+            <div className="text-center mb-8">
+              <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-cyan-500 via-brand-500 to-indigo-600 shadow-xl shadow-cyan-500/25 mb-4 border border-white/10">
+                <span className="text-xl font-black text-white tracking-tighter">DF</span>
+              </div>
+              <h1 className="text-2xl font-black tracking-tight text-white">DubFlow Studio</h1>
+              <p className="text-xs text-slate-400 mt-1">Universal AI Video Dubbing & Localization Portal</p>
+            </div>
+
+            {error && (
+              <div className="mb-6 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center gap-2">
+                <span className="text-base">⚠️</span>
+                <span>{error}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-5">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                  Admin Email
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                    <Icons.Mail />
+                  </div>
+                  <input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="admin@admin.com"
+                    className="w-full pl-11 pr-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-slate-100 text-sm transition outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                  Password
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                    <Icons.Lock />
+                  </div>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full pl-11 pr-11 py-2.5 rounded-xl bg-surface-900 border border-slate-700 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-slate-100 text-sm transition outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-200"
+                  >
+                    {showPassword ? <Icons.EyeOff /> : <Icons.Eye />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-xs text-slate-400">
+                <span className="text-slate-400">Default: admin@admin.com / admin@1994</span>
+                <button
+                  type="button"
+                  onClick={handleQuickFill}
+                  className="text-brand-400 hover:text-brand-300 underline font-medium"
+                >
+                  Quick Autofill
+                </button>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-brand-600 via-indigo-600 to-cyan-500 hover:opacity-95 text-white font-bold text-sm shadow-lg shadow-brand-500/25 transition transform active:scale-95 glowing-btn disabled:opacity-50"
+              >
+                {isSubmitting ? "Authenticating..." : "Sign In to DubFlow Studio"}
+              </button>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Main Application with Sidebar & Views
+    // =========================================================================
+    function App() {
+      const [isAuthenticated, setIsAuthenticated] = useState(() => {
+        return localStorage.getItem("admin_auth") === "true";
+      });
+
+      // Navigation state: 'dashboard' | 'videos' | 'video_details'
+      const [activeTab, setActiveTab] = useState("dashboard");
+      const [selectedVideoId, setSelectedVideoId] = useState(null);
+
+      // Data state
+      const [systemStats, setSystemStats] = useState(null);
+      const [videosList, setVideosList] = useState([]);
+      const [isLoadingVideos, setIsLoadingVideos] = useState(false);
+
+      // Modals
+      const [isAddVideoModalOpen, setIsAddVideoModalOpen] = useState(false);
+      const [isEditVideoModalOpen, setIsEditVideoModalOpen] = useState(false);
+      const [editingVideo, setEditingVideo] = useState(null);
+
+      // YTD state: channels, stats, selected channel, modals
+      const [ytdChannels, setYtdChannels] = useState([]);
+      const [ytdStats, setYtdStats] = useState(null);
+      const [isLoadingYtd, setIsLoadingYtd] = useState(false);
+      const [selectedChannelId, setSelectedChannelId] = useState(null);
+      const [isAddChannelModalOpen, setIsAddChannelModalOpen] = useState(false);
+      const [editingChannel, setEditingChannel] = useState(null);
+      const [downloadModalVideo, setDownloadModalVideo] = useState(null);
+
+      // Fetch system stats
+      const fetchStats = async () => {
+        try {
+          const res = await fetch("/api/system/stats");
+          if (res.ok) {
+            const data = await res.json();
+            setSystemStats(data);
+          }
+        } catch (err) {
+          console.error("Failed to load system stats:", err);
+        }
+      };
+
+      // Fetch videos list
+      const fetchVideos = async () => {
+        setIsLoadingVideos(true);
+        try {
+          const res = await fetch("/api/videos");
+          if (res.ok) {
+            const data = await res.json();
+            setVideosList(data);
+          }
+        } catch (err) {
+          console.error("Failed to load videos:", err);
+        } finally {
+          setIsLoadingVideos(false);
+        }
+      };
+
+      // Fetch YTD channels
+      const fetchYtdChannels = async () => {
+        setIsLoadingYtd(true);
+        try {
+          const res = await fetch("/api/ytd/channels");
+          if (res.ok) {
+            const data = await res.json();
+            setYtdChannels(data);
+          }
+        } catch (err) {
+          console.error("Failed to load YTD channels:", err);
+        } finally {
+          setIsLoadingYtd(false);
+        }
+      };
+
+      // Fetch YTD stats
+      const fetchYtdStats = async () => {
+        try {
+          const res = await fetch("/api/ytd/stats");
+          if (res.ok) {
+            const data = await res.json();
+            setYtdStats(data);
+          }
+        } catch (err) {
+          console.error("Failed to load YTD stats:", err);
+        }
+      };
+
+      useEffect(() => {
+        if (isAuthenticated) {
+          fetchStats();
+          fetchVideos();
+          fetchYtdChannels();
+          fetchYtdStats();
+          const timer = setInterval(() => {
+            fetchStats();
+            fetchYtdStats();
+          }, 8000);
+          return () => clearInterval(timer);
+        }
+      }, [isAuthenticated]);
+
+      const handleLogout = () => {
+        localStorage.removeItem("admin_auth");
+        localStorage.removeItem("admin_user");
+        setIsAuthenticated(false);
+      };
+
+      const handleOpenVideoDetails = (videoId) => {
+        setSelectedVideoId(videoId);
+        setActiveTab("video_details");
+      };
+
+      const handleDeleteVideoProject = async (vidId, vidTitle) => {
+        const promptText = vidTitle
+          ? `Are you sure you want to delete video project "${vidTitle}"? This will permanently delete all associated conversions and files.`
+          : "Are you sure you want to delete this video project? This will permanently delete all associated conversions and files.";
+        if (window.confirm(promptText)) {
+          try {
+            const res = await fetch(`/api/videos/${vidId}`, { method: "DELETE" });
+            if (res.ok) {
+              fetchVideos();
+              fetchStats();
+              if (selectedVideoId === vidId) {
+                setSelectedVideoId(null);
+                setActiveTab("videos");
+              }
+            } else {
+              const err = await res.json().catch(() => ({}));
+              alert("Failed to delete video: " + (err.detail || "Server error"));
+            }
+          } catch (err) {
+            alert("Error deleting video: " + err.message);
+          }
+        }
+      };
+
+      const handleSyncChannel = async (channelId) => {
+        try {
+          const res = await fetch(`/api/ytd/channels/${channelId}/sync`, { method: "POST" });
+          if (res.ok) {
+            fetchYtdChannels();
+            fetchYtdStats();
+          } else {
+            const err = await res.json().catch(() => ({}));
+            alert("Failed to sync channel: " + (err.detail || "Server error"));
+          }
+        } catch (err) {
+          alert("Error syncing channel: " + err.message);
+        }
+      };
+
+      const handleDeleteChannel = async (channelId, title) => {
+        const promptText = title
+          ? `Are you sure you want to delete channel "${title}" and all its videos/files?`
+          : "Are you sure you want to delete this channel and its videos?";
+        if (window.confirm(promptText)) {
+          try {
+            const res = await fetch(`/api/ytd/channels/${channelId}`, { method: "DELETE" });
+            if (res.ok) {
+              fetchYtdChannels();
+              fetchYtdStats();
+              if (selectedChannelId === channelId) {
+                setSelectedChannelId(null);
+                setActiveTab("ytd");
+              }
+            } else {
+              const err = await res.json().catch(() => ({}));
+              alert("Failed to delete channel: " + (err.detail || "Server error"));
+            }
+          } catch (err) {
+            alert("Error deleting channel: " + err.message);
+          }
+        }
+      };
+
+      const handleDeleteYtdVideo = async (videoId, title) => {
+        const promptText = title
+          ? `Are you sure you want to delete video "${title}"? This will delete all downloaded files and blacklist it so it is never re-added on sync.`
+          : "Are you sure you want to delete this video? It will never be re-added on sync.";
+        if (window.confirm(promptText)) {
+          try {
+            const res = await fetch(`/api/ytd/videos/${videoId}`, { method: "DELETE" });
+            if (res.ok) {
+              fetchYtdChannels();
+              fetchYtdStats();
+              return true;
+            } else {
+              const err = await res.json().catch(() => ({}));
+              alert("Failed to delete video: " + (err.detail || "Server error"));
+              return false;
+            }
+          } catch (err) {
+            alert("Error deleting video: " + err.message);
+            return false;
+          }
+        }
+        return false;
+      };
+
+      if (!isAuthenticated) {
+        return <LoginScreen onLoginSuccess={() => setIsAuthenticated(true)} />;
+      }
+
+      return (
+        <div className="flex h-screen bg-surface-950 text-slate-100 overflow-hidden">
+          {/* Sidebar */}
+          <aside className="w-64 flex-shrink-0 bg-surface-900 border-r border-slate-800 flex flex-col justify-between z-20">
+            <div>
+              {/* Brand Header */}
+              <div className="p-6 border-b border-slate-800/80 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 via-brand-500 to-indigo-600 flex items-center justify-center font-black text-white text-base shadow-lg shadow-cyan-500/20 border border-white/10">
+                  DF
+                </div>
+                <div>
+                  <h1 className="font-black text-base tracking-tight text-white leading-tight">DubFlow</h1>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 uppercase tracking-widest">
+                    Studio Admin
+                  </span>
+                </div>
+              </div>
+
+              {/* Navigation Menu */}
+              <nav className="p-4 space-y-1.5">
+                <button
+                  type="button"
+                  onClick={() => { setActiveTab("dashboard"); setSelectedVideoId(null); }}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-semibold text-sm transition ${activeTab === 'dashboard' ? 'bg-gradient-to-r from-brand-600 to-indigo-600 text-white shadow-lg shadow-brand-500/25' : 'text-slate-300 hover:bg-surface-850 hover:text-white'}`}
+                >
+                  <Icons.Dashboard />
+                  <span>Dashboard</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => { setActiveTab("videos"); }}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-semibold text-sm transition ${activeTab === 'videos' || activeTab === 'video_details' ? 'bg-gradient-to-r from-brand-600 to-indigo-600 text-white shadow-lg shadow-brand-500/25' : 'text-slate-300 hover:bg-surface-850 hover:text-white'}`}
+                >
+                  <Icons.Videos />
+                  <span>Videos</span>
+                  {videosList.length > 0 && (
+                    <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-black/30 text-slate-200">
+                      {videosList.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => { setActiveTab("ytd"); setSelectedChannelId(null); }}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-semibold text-sm transition ${activeTab === 'ytd' || activeTab === 'ytd_channel_details' ? 'bg-gradient-to-r from-red-600 to-rose-600 text-white shadow-lg shadow-red-500/25' : 'text-slate-300 hover:bg-surface-850 hover:text-white'}`}
+                >
+                  <Icons.Youtube />
+                  <span>YTD</span>
+                  {ytdChannels.length > 0 && (
+                    <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-black/30 text-slate-200">
+                      {ytdChannels.length}
+                    </span>
+                  )}
+                </button>
+              </nav>
+            </div>
+
+            {/* Bottom Hardware Widget & User Card */}
+            <div className="p-4 border-t border-slate-800 space-y-3">
+              {/* Mini RAM Status */}
+              <div className="p-3 rounded-xl bg-surface-850 border border-white/5 text-xs">
+                <div className="flex items-center justify-between text-slate-400 mb-1.5">
+                  <span className="font-semibold text-slate-300">
+                    {systemStats?.hardware?.os === 'Darwin' ? 'System RAM' : 'Server Memory'}
+                  </span>
+                  <span className="font-bold text-cyan-400">{systemStats?.ram?.percent || 0}%</span>
+                </div>
+                <div className="w-full bg-surface-900 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className="bg-gradient-to-r from-brand-500 to-indigo-400 h-1.5 rounded-full transition-all duration-500"
+                    style={{ width: `${systemStats?.ram?.percent || 0}%` }}
+                  ></div>
+                </div>
+                <div className="flex justify-between items-center mt-2 text-[10px] text-slate-500">
+                  <span>{systemStats?.ram?.used_gb || 0} GB Used</span>
+                  <span>{systemStats?.ram?.total_gb || 0} GB Total</span>
+                </div>
+              </div>
+
+              {/* User Profile Card */}
+              <div className="flex items-center justify-between pt-2">
+                <div className="flex items-center gap-2.5 overflow-hidden">
+                  <div className="w-8 h-8 rounded-full bg-indigo-700 flex items-center justify-center font-bold text-xs text-white flex-shrink-0">
+                    AD
+                  </div>
+                  <div className="overflow-hidden">
+                    <p className="text-xs font-bold text-white truncate">admin@admin.com</p>
+                    <p className="text-[10px] text-slate-400">Super Admin</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  title="Log out"
+                  onClick={handleLogout}
+                  className="p-2 text-slate-400 hover:text-red-400 hover:bg-surface-850 rounded-lg transition"
+                >
+                  <Icons.Logout />
+                </button>
+              </div>
+            </div>
+          </aside>
+
+          {/* Main Content Area */}
+          <main className="flex-1 flex flex-col overflow-y-auto">
+            {/* Top Bar Header */}
+            <header className="h-16 px-8 border-b border-slate-800 flex items-center justify-between flex-shrink-0 bg-surface-950/80 backdrop-blur sticky top-0 z-10">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-slate-400">Admin</span>
+                <span className="text-slate-600">/</span>
+                <span className="font-bold text-white capitalize">
+                  {activeTab === 'video_details' ? 'Video Project Details' : activeTab === 'ytd_channel_details' ? 'Channel Videos' : activeTab === 'ytd' ? 'YouTube Downloader (YTD)' : activeTab}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span>{systemStats?.hardware?.engine_label || 'Hardware Acceleration Engine Active'}</span>
+                </div>
+
+                {activeTab === 'ytd' ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsAddChannelModalOpen(true)}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition shadow-md shadow-red-500/20"
+                  >
+                    <Icons.Plus />
+                    <span>Add New Channel</span>
+                  </button>
+                ) : activeTab === 'ytd_channel_details' ? (
+                  <button
+                    type="button"
+                    onClick={() => { setActiveTab('ytd'); setSelectedChannelId(null); fetchYtdChannels(); }}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-200 font-bold text-xs transition border border-white/10"
+                  >
+                    <Icons.ArrowLeft />
+                    <span>Back to Channels</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setIsAddVideoModalOpen(true)}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs transition shadow-md shadow-brand-500/20"
+                  >
+                    <Icons.Plus />
+                    <span>Add New Video</span>
+                  </button>
+                )}
+              </div>
+            </header>
+
+            {/* View Switching */}
+            <div className="p-8 max-w-7xl w-full mx-auto">
+              {activeTab === "dashboard" && (
+                <DashboardView
+                  stats={systemStats}
+                  onRefresh={fetchStats}
+                  onOpenVideoDetails={handleOpenVideoDetails}
+                  onAddVideo={() => setIsAddVideoModalOpen(true)}
+                  videosList={videosList}
+                  onDeleteVideo={handleDeleteVideoProject}
+                />
+              )}
+
+              {activeTab === "videos" && (
+                <VideosListView
+                  videos={videosList}
+                  isLoading={isLoadingVideos}
+                  onRefresh={fetchVideos}
+                  onOpenDetails={handleOpenVideoDetails}
+                  onOpenAddModal={() => setIsAddVideoModalOpen(true)}
+                  onEditVideo={(vid) => { setEditingVideo(vid); setIsEditVideoModalOpen(true); }}
+                  onDeleteVideo={handleDeleteVideoProject}
+                />
+              )}
+
+              {activeTab === "video_details" && selectedVideoId && (
+                <VideoDetailsView
+                  videoId={selectedVideoId}
+                  onBack={() => { setActiveTab("videos"); fetchVideos(); fetchStats(); }}
+                  onJobCreated={() => { fetchStats(); fetchVideos(); }}
+                  onDeleteVideo={handleDeleteVideoProject}
+                />
+              )}
+
+              {activeTab === "ytd" && (
+                <YtdChannelsView
+                  channels={ytdChannels}
+                  stats={ytdStats}
+                  isLoading={isLoadingYtd}
+                  onRefresh={() => { fetchYtdChannels(); fetchYtdStats(); }}
+                  onOpenAddModal={() => setIsAddChannelModalOpen(true)}
+                  onOpenDetails={(chId) => { setSelectedChannelId(chId); setActiveTab("ytd_channel_details"); }}
+                  onEditChannel={(ch) => { setEditingChannel(ch); }}
+                  onDeleteChannel={handleDeleteChannel}
+                  onSyncChannel={handleSyncChannel}
+                />
+              )}
+
+              {activeTab === "ytd_channel_details" && selectedChannelId && (
+                <YtdChannelDetailsView
+                  channelId={selectedChannelId}
+                  onBack={() => { setActiveTab("ytd"); setSelectedChannelId(null); fetchYtdChannels(); }}
+                  onDownloadVideo={(video) => setDownloadModalVideo(video)}
+                  onDeleteVideo={handleDeleteYtdVideo}
+                  onSyncChannel={handleSyncChannel}
+                />
+              )}
+            </div>
+          </main>
+
+          {/* Add New Video Modal */}
+          {isAddVideoModalOpen && (
+            <AddVideoModal
+              onClose={() => setIsAddVideoModalOpen(false)}
+              onCreated={(createdVid) => {
+                setIsAddVideoModalOpen(false);
+                fetchVideos();
+                fetchStats();
+                setSelectedVideoId(createdVid.id);
+                setActiveTab("video_details");
+              }}
+            />
+          )}
+
+          {/* Edit Video Modal */}
+          {isEditVideoModalOpen && editingVideo && (
+            <EditVideoModal
+              video={editingVideo}
+              onClose={() => { setIsEditVideoModalOpen(false); setEditingVideo(null); }}
+              onUpdated={() => {
+                setIsEditVideoModalOpen(false);
+                setEditingVideo(null);
+                fetchVideos();
+              }}
+            />
+          )}
+
+          {/* Add Channel Modal */}
+          {isAddChannelModalOpen && (
+            <AddChannelModal
+              onClose={() => setIsAddChannelModalOpen(false)}
+              onCreated={(newCh) => {
+                setIsAddChannelModalOpen(false);
+                fetchYtdChannels();
+                fetchYtdStats();
+              }}
+            />
+          )}
+
+          {/* Edit Channel Modal */}
+          {editingChannel && (
+            <EditChannelModal
+              channel={editingChannel}
+              onClose={() => setEditingChannel(null)}
+              onUpdated={() => {
+                setEditingChannel(null);
+                fetchYtdChannels();
+              }}
+            />
+          )}
+
+          {/* Download Video Modal (Full, Splits, Shorts) */}
+          {downloadModalVideo && (
+            <YtdDownloadModal
+              video={downloadModalVideo}
+              onClose={() => setDownloadModalVideo(null)}
+              onDownloadStarted={() => {
+                fetchYtdStats();
+              }}
+            />
+          )}
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Dashboard View Component
+    // =========================================================================
+    function DashboardView({ stats, onRefresh, onOpenVideoDetails, onAddVideo, videosList, onDeleteVideo }) {
+      const counts = stats?.counts || { total_videos: 0, total_conversions: 0, active_jobs: 0, total_languages: 0 };
+      const activeJobs = stats?.active_jobs || [];
+      const hasActive = activeJobs.length > 0;
+      const primaryActive = hasActive ? activeJobs[0] : null;
+
+      return (
+        <div className="space-y-8">
+          {/* Current Running Conversion Status Card */}
+          <div className="glass-card rounded-2xl p-6 border border-white/10 relative overflow-hidden">
+            {hasActive ? (
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-3 w-3 relative">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+                    </span>
+                    <h2 className="text-base font-bold text-white">Active Video Conversion In Progress</h2>
+                  </div>
+                  <span className="text-xs px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-bold uppercase tracking-wider">
+                    Processing
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                  <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
+                    <div className="text-xs text-gray-400">Current Task</div>
+                    <div className="font-bold text-white text-sm truncate mt-0.5">
+                      {primaryActive.part_name || "Full Video"} (Job: {primaryActive.job_id})
+                    </div>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
+                    <div className="text-xs text-gray-400">Target Languages</div>
+                    <div className="flex items-center gap-1.5 mt-1">
+                      {(primaryActive.target_langs || []).map(l => (
+                        <span key={l} className="text-xs px-2 py-0.5 rounded bg-surface-800 text-slate-200 border border-white/5 font-semibold">
+                          {LANG_MAP[l]?.flag} {LANG_MAP[l]?.name || l}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
+                    <div className="text-xs text-gray-400">Overall Progress</div>
+                    <div className="font-black text-brand-400 text-lg mt-0.5">
+                      {Math.round((primaryActive.progress || 0) * 100)}%
+                    </div>
+                  </div>
+                </div>
+
+                {/* Progress bar */}
+                <div className="w-full bg-surface-900 rounded-full h-3 overflow-hidden mb-2">
+                  <div
+                    className="bg-gradient-to-r from-brand-600 via-indigo-500 to-pink-500 h-3 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.round((primaryActive.progress || 0) * 100)}%` }}
+                  ></div>
+                </div>
+                <p className="text-xs text-slate-400 flex items-center justify-between">
+                  <span>Current Step: <strong className="text-slate-200">{primaryActive.current_step}</strong></span>
+                  <span className="text-[11px] text-slate-500">Updates live over WebSocket</span>
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                    <h2 className="text-base font-bold text-white">Conversion Engine Ready (Idle)</h2>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    No conversion jobs currently executing. The automated dubbing pipeline is idle and ready for video conversion.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={onAddVideo}
+                  className="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs transition shadow-lg shadow-brand-500/20"
+                >
+                  Start New Video Conversion
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Counts Metric Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="glass-card rounded-2xl p-5 border border-white/5">
+              <div className="flex items-center justify-between text-slate-400 mb-2">
+                <span className="text-xs font-semibold uppercase tracking-wider">Total Videos</span>
+                <Icons.Videos />
+              </div>
+              <div className="text-3xl font-black text-white">{counts.total_videos}</div>
+              <div className="text-[11px] text-slate-400 mt-1">Managed projects</div>
+            </div>
+
+            <div className="glass-card rounded-2xl p-5 border border-white/5">
+              <div className="flex items-center justify-between text-slate-400 mb-2">
+                <span className="text-xs font-semibold uppercase tracking-wider">Converted Parts</span>
+                <Icons.Play />
+              </div>
+              <div className="text-3xl font-black text-indigo-400">{counts.total_conversions}</div>
+              <div className="text-[11px] text-slate-400 mt-1">Completed videos & parts</div>
+            </div>
+
+            <div className="glass-card rounded-2xl p-5 border border-white/5">
+              <div className="flex items-center justify-between text-slate-400 mb-2">
+                <span className="text-xs font-semibold uppercase tracking-wider">Active Running</span>
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+              </div>
+              <div className="text-3xl font-black text-amber-400">{counts.active_jobs}</div>
+              <div className="text-[11px] text-slate-400 mt-1">Currently in pipeline</div>
+            </div>
+
+            <div className="glass-card rounded-2xl p-5 border border-white/5">
+              <div className="flex items-center justify-between text-slate-400 mb-2">
+                <span className="text-xs font-semibold uppercase tracking-wider">Languages Used</span>
+                <span className="text-base">🌐</span>
+              </div>
+              <div className="text-3xl font-black text-emerald-400">{counts.total_languages}</div>
+              <div className="text-[11px] text-slate-400 mt-1">Target languages dubbed</div>
+            </div>
+          </div>
+
+          {/* Pie Charts Section (Languages & System RAM) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Pie Chart 1: Languages Distribution */}
+            <div className="glass-card rounded-2xl p-6 border border-white/5">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="font-bold text-base text-white">Converted Videos by Language</h3>
+                  <p className="text-xs text-slate-400">Distribution of videos changed into each target language</p>
+                </div>
+                <span className="text-xs px-2.5 py-1 rounded-full bg-surface-850 text-indigo-400 font-bold border border-white/5">
+                  Pie Chart
+                </span>
+              </div>
+              <LanguagePieChart data={stats?.languages || {}} size={240} />
+            </div>
+
+            {/* Pie Chart 2: System RAM Used */}
+            <div className="glass-card rounded-2xl p-6 border border-white/5">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="font-bold text-base text-white">System Memory (RAM)</h3>
+                  <p className="text-xs text-slate-400">
+                    Real-time host memory telemetry ({stats?.hardware?.engine_label || 'Host System'})
+                  </p>
+                </div>
+                <span className="text-xs px-2.5 py-1 rounded-full bg-surface-850 text-emerald-400 font-bold border border-white/5">
+                  {stats?.hardware?.os ? `${stats.hardware.os} Host` : 'Live System'}
+                </span>
+              </div>
+              <RamDonutChart ram={stats?.ram} onRefresh={onRefresh} />
+            </div>
+          </div>
+
+          {/* Recent Videos Overview */}
+          <div className="glass-card rounded-2xl p-6 border border-white/5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-base text-white">Recent Converted Videos</h3>
+              <span className="text-xs text-slate-400">Showing latest records</span>
+            </div>
+
+            {videosList.length === 0 ? (
+              <div className="text-center py-8 text-slate-500 text-xs">
+                No videos created yet. Click "+ Add New Video" to begin.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold">
+                      <th className="pb-3 pl-2">Title</th>
+                      <th className="pb-3">YouTube Link</th>
+                      <th className="pb-3">Languages</th>
+                      <th className="pb-3">Conversions</th>
+                      <th className="pb-3 text-right pr-2">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {videosList.slice(0, 5).map(v => (
+                      <tr key={v.id} className="hover:bg-surface-850 transition">
+                        <td className="py-3 pl-2 font-bold text-slate-200">
+                          {v.title}
+                        </td>
+                        <td className="py-3">
+                          {v.youtube_url ? (
+                            <a
+                              href={v.youtube_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-brand-400 hover:text-brand-300 font-medium inline-flex items-center"
+                            >
+                              <span className="truncate max-w-[200px]">{v.youtube_url}</span>
+                              <Icons.ExternalLink />
+                            </a>
+                          ) : (
+                            <span className="text-slate-500">Local Upload</span>
+                          )}
+                        </td>
+                        <td className="py-3">
+                          <div className="flex items-center gap-1">
+                            {(v.languages || []).map(code => (
+                              <span
+                                key={code}
+                                className="px-2 py-0.5 rounded bg-surface-800 text-slate-300 font-semibold border border-white/5 text-[11px]"
+                              >
+                                {LANG_MAP[code]?.flag} {code.toUpperCase()}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="py-3 text-slate-400">
+                          {v.conversions?.length || 0} part(s)
+                        </td>
+                        <td className="py-3 text-right pr-2">
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => onOpenVideoDetails(v.id)}
+                              className="px-3 py-1 rounded-lg bg-surface-800 hover:bg-brand-600 text-slate-200 hover:text-white font-semibold transition"
+                            >
+                              Details
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onDeleteVideo && onDeleteVideo(v.id, v.title)}
+                              className="p-1 rounded-lg bg-surface-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 border border-white/5 transition"
+                              title="Delete Video"
+                            >
+                              <Icons.Trash />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Videos List View Component
+    // =========================================================================
+    function VideosListView({ videos = [], isLoading, onRefresh, onOpenDetails, onOpenAddModal, onEditVideo, onDeleteVideo }) {
+      const [searchQuery, setSearchQuery] = useState("");
+      const [selectedLangFilter, setSelectedLangFilter] = useState("all");
+
+      const filteredVideos = videos.filter(v => {
+        const matchesSearch = v.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          v.youtube_url?.toLowerCase().includes(searchQuery.toLowerCase());
+        const matchesLang = selectedLangFilter === "all" || (v.languages && v.languages.includes(selectedLangFilter));
+        return matchesSearch && matchesLang;
+      });
+
+      return (
+        <div className="space-y-6">
+          {/* Header Controls */}
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+            <div className="flex flex-1 items-center gap-3">
+              <input
+                type="text"
+                placeholder="Search videos by title or URL..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full max-w-xs px-4 py-2 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-200 placeholder-slate-500 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+              />
+
+              <select
+                value={selectedLangFilter}
+                onChange={(e) => setSelectedLangFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-300 focus:border-brand-500 outline-none"
+              >
+                <option value="all">All Languages</option>
+                {LANGUAGES.map(l => (
+                  <option key={l.code} value={l.code}>
+                    {l.flag} {l.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onRefresh}
+                className="p-2 rounded-xl bg-surface-900 hover:bg-surface-850 text-slate-300 border border-slate-800 transition"
+                title="Refresh videos"
+              >
+                <Icons.Refresh />
+              </button>
+
+              <button
+                type="button"
+                onClick={onOpenAddModal}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-sm transition shadow-lg shadow-brand-500/25"
+              >
+                <Icons.Plus />
+                <span>Add New Video</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Videos Table */}
+          <div className="glass-card rounded-2xl overflow-hidden border border-white/10">
+            {isLoading ? (
+              <div className="text-center py-12 text-slate-400">Loading videos library...</div>
+            ) : filteredVideos.length === 0 ? (
+              <div className="text-center py-16">
+                <div className="text-3xl mb-2">🎬</div>
+                <h3 className="text-base font-bold text-white mb-1">No videos found</h3>
+                <p className="text-xs text-slate-400 mb-4">
+                  {searchQuery ? "Try refining your search query." : "Create your first video project to begin dubbing."}
+                </p>
+                <button
+                  type="button"
+                  onClick={onOpenAddModal}
+                  className="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition"
+                >
+                  Create Video Project
+                </button>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 bg-surface-900/50 text-slate-400 uppercase tracking-wider font-semibold">
+                      <th className="py-3.5 pl-6">Video Title & ID</th>
+                      <th className="py-3.5">YouTube Link</th>
+                      <th className="py-3.5">Languages</th>
+                      <th className="py-3.5">Conversions / Parts</th>
+                      <th className="py-3.5">Status</th>
+                      <th className="py-3.5 text-right pr-6">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {filteredVideos.map(video => {
+                      const conversions = video.conversions || [];
+                      const isMultipart = conversions.some(c => c.is_multipart);
+                      const convLabel = isMultipart ? `${conversions.length} Part(s)` : (conversions.length > 0 ? "Single Video" : "None");
+
+                      return (
+                        <tr key={video.id} className="hover:bg-surface-850/60 transition">
+                          <td className="py-4 pl-6">
+                            <div className="font-bold text-slate-100 text-sm">{video.title}</div>
+                            <div className="text-[11px] text-slate-500 font-mono mt-0.5">ID: {video.id}</div>
+                          </td>
+
+                          <td className="py-4">
+                            {video.youtube_url ? (
+                              <a
+                                href={video.youtube_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-brand-400 hover:text-brand-300 font-medium inline-flex items-center gap-1 group"
+                              >
+                                <span className="truncate max-w-[220px]">{video.youtube_url}</span>
+                                <Icons.ExternalLink />
+                              </a>
+                            ) : (
+                              <span className="text-slate-500">Local Upload</span>
+                            )}
+                          </td>
+
+                          <td className="py-4">
+                            <div className="flex flex-wrap items-center gap-1">
+                              {video.languages && video.languages.length > 0 ? (
+                                video.languages.map(code => (
+                                  <span
+                                    key={code}
+                                    className="px-2 py-0.5 rounded bg-surface-800 text-slate-300 border border-white/5 font-semibold text-[11px]"
+                                  >
+                                    {LANG_MAP[code]?.flag} {LANG_MAP[code]?.name || code.toUpperCase()}
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="text-slate-500 text-[11px] italic">Not dubbed yet</span>
+                              )}
+                            </div>
+                          </td>
+
+                          <td className="py-4">
+                            <span className="px-2.5 py-1 rounded-full bg-surface-800 text-slate-300 border border-white/5 font-semibold text-[11px]">
+                              {convLabel}
+                            </span>
+                          </td>
+
+                          <td className="py-4">
+                            {video.status === "completed" ? (
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-bold uppercase text-[10px]">
+                                Completed
+                              </span>
+                            ) : video.status === "processing" ? (
+                              <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-bold uppercase text-[10px] animate-pulse">
+                                Processing
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full bg-slate-500/10 text-slate-400 border border-slate-500/20 font-bold uppercase text-[10px]">
+                                Draft
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="py-4 text-right pr-6">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => onEditVideo(video)}
+                                className="p-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white transition"
+                                title="Edit Title & Link"
+                              >
+                                <Icons.Edit />
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => onOpenDetails(video.id)}
+                                className="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-bold transition flex items-center gap-1 shadow-sm shadow-brand-500/20"
+                              >
+                                <Icons.Details />
+                                <span>Details</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => onDeleteVideo && onDeleteVideo(video.id, video.title)}
+                                className="p-1.5 rounded-lg bg-surface-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 border border-white/5 transition"
+                                title="Delete Video Project"
+                              >
+                                <Icons.Trash />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Video Details View (Contains Current Dubbing Form & Converted Videos Section)
+    // =========================================================================
+    function VideoDetailsView({ videoId, onBack, onJobCreated, onDeleteVideo }) {
+      const [video, setVideo] = useState(null);
+      const [isLoading, setIsLoading] = useState(true);
+
+      const handleDeleteVideoProject = () => {
+        if (onDeleteVideo) {
+          onDeleteVideo(videoId, video?.title);
+        } else {
+          const title = video ? video.title : videoId;
+          if (window.confirm(`Are you sure you want to delete video project "${title}"? This will permanently delete all associated conversions and files.`)) {
+            fetch(`/api/videos/${videoId}`, { method: "DELETE" })
+              .then(res => {
+                if (res.ok) {
+                  onBack && onBack();
+                } else {
+                  alert("Failed to delete video project");
+                }
+              })
+              .catch(err => alert("Error: " + err.message));
+          }
+        }
+      };
+
+      const handleDeleteConversion = async (jobId, partName) => {
+        const name = partName || jobId;
+        if (window.confirm(`Are you sure you want to delete converted video "${name}"? This will permanently delete its media files.`)) {
+          try {
+            const res = await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
+            if (res.ok) {
+              loadVideo();
+              onJobCreated && onJobCreated();
+            } else {
+              const err = await res.json().catch(() => ({}));
+              alert("Failed to delete converted video: " + (err.detail || "Server error"));
+            }
+          } catch (err) {
+            alert("Error deleting conversion: " + err.message);
+          }
+        }
+      };
+
+      // Studio Form State
+      const [youtubeUrl, setYoutubeUrl] = useState("");
+      const [targetLang, setTargetLang] = useState("es");
+      const [isMultiLang, setIsMultiLang] = useState(false);
+      const [selectedLangs, setSelectedLangs] = useState(["de", "fr", "id"]);
+      const [selectedVoice, setSelectedVoice] = useState("es-ES-AlvaroNeural");
+      const [splitMode, setSplitMode] = useState("full"); // 'full' or 'parts'
+      const [partDurationMins, setPartDurationMins] = useState(10);
+      const [selectedPartIndex, setSelectedPartIndex] = useState(0);
+      const [bgVolume, setBgVolume] = useState(0.80);
+      const [vocalsVolume, setVocalsVolume] = useState(1.00);
+      const [speedCap, setSpeedCap] = useState(1.15);
+      const [whisperModel, setWhisperModel] = useState("base");
+      const [enableWatermark, setEnableWatermark] = useState(false);
+      const [watermarkText, setWatermarkText] = useState("");
+      const [geminiApiKey, setGeminiApiKey] = useState("");
+
+      // Active conversion tracking
+      const [activeJobId, setActiveJobId] = useState(null);
+      const [jobProgress, setJobProgress] = useState(0);
+      const [jobStep, setJobStep] = useState("");
+      const [jobLogs, setJobLogs] = useState([]);
+      const [isSubmitting, setIsSubmitting] = useState(false);
+
+      // SEO Modal State
+      const [isSeoModalOpen, setIsSeoModalOpen] = useState(false);
+      const [seoPackData, setSeoPackData] = useState(null);
+      const [activeSeoLang, setActiveSeoLang] = useState("de");
+      const [isFetchingPack, setIsFetchingPack] = useState(false);
+      const [copiedField, setCopiedField] = useState(null);
+
+      // Load Video details from API
+      const loadVideo = async () => {
+        try {
+          const res = await fetch(`/api/videos/${videoId}`);
+          if (res.ok) {
+            const data = await res.json();
+            setVideo(data);
+            if (data.youtube_url && !youtubeUrl) {
+              setYoutubeUrl(data.youtube_url);
+            }
+          }
+        } catch (e) {
+          console.error("Failed to load video details:", e);
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      useEffect(() => {
+        loadVideo();
+      }, [videoId]);
+
+      // WebSocket live updates for active job
+      useEffect(() => {
+        if (!activeJobId) return;
+
+        let ws;
+        try {
+          const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+          ws = new WebSocket(`${protocol}//${window.location.host}/api/jobs/${activeJobId}/ws`);
+          ws.onmessage = (e) => {
+            try {
+              const msg = JSON.parse(e.data);
+              if (msg.type === "progress") {
+                setJobProgress(msg.progress);
+                setJobStep(msg.step);
+                if (msg.log) setJobLogs(prev => [...prev, msg.log]);
+              } else if (msg.type === "completed") {
+                setJobProgress(1.0);
+                setJobStep("Completed successfully!");
+                setActiveJobId(null);
+                loadVideo();
+                onJobCreated && onJobCreated();
+              } else if (msg.type === "failed") {
+                setJobStep(`Failed: ${msg.error}`);
+                setActiveJobId(null);
+                loadVideo();
+              }
+            } catch (err) {}
+          };
+        } catch (err) {}
+
+        return () => {
+          if (ws) ws.close();
+        };
+      }, [activeJobId]);
+
+      // Calculate Parts from Duration (Default sample 60 min or custom)
+      const calculatePartsList = () => {
+        const totalSec = 3600; // 1 hour baseline
+        const partSec = partDurationMins * 60;
+        const totalParts = Math.ceil(totalSec / partSec);
+        const list = [];
+        for (let i = 0; i < totalParts; i++) {
+          const startSec = i * partSec;
+          const endSec = Math.min((i + 1) * partSec, totalSec);
+          list.push({
+            index: i,
+            label: `Part ${i + 1}`,
+            start_seconds: startSec,
+            duration_seconds: endSec - startSec
+          });
+        }
+        return list;
+      };
+
+      const partsList = calculatePartsList();
+
+      const handleStartDubbing = async (e) => {
+        e.preventDefault();
+        if (!youtubeUrl.trim()) {
+          alert("Please enter a valid YouTube video URL.");
+          return;
+        }
+
+        setIsSubmitting(true);
+        setJobProgress(0.02);
+        setJobStep("Submitting dubbing job to backend...");
+        setJobLogs(["[00:00:00] Initializing dubbing job..."]);
+
+        try {
+          const formData = new FormData();
+          formData.append("video_id", videoId);
+          formData.append("youtube_url", youtubeUrl.trim());
+
+          if (isMultiLang) {
+            formData.append("target_langs", selectedLangs.join(","));
+            formData.append("target_lang", selectedLangs[0] || targetLang);
+          } else {
+            formData.append("target_lang", targetLang);
+          }
+
+          formData.append("voice", selectedVoice);
+          formData.append("whisper_model", whisperModel);
+          formData.append("bg_volume", String(bgVolume));
+          formData.append("vocals_volume", String(vocalsVolume));
+          formData.append("speed_cap", String(speedCap));
+
+          if (splitMode === "parts") {
+            const part = partsList[selectedPartIndex] || partsList[0];
+            formData.append("part_name", part.label);
+            formData.append("start_seconds", String(part.start_seconds));
+            formData.append("duration_seconds", String(part.duration_seconds));
+          }
+
+          if (enableWatermark && watermarkText.trim()) {
+            formData.append("enable_watermark", "true");
+            formData.append("watermark_text", watermarkText.trim());
+          }
+
+          if (geminiApiKey.trim()) {
+            formData.append("gemini_api_key", geminiApiKey.trim());
+          }
+
+          const res = await fetch("/api/dub", {
+            method: "POST",
+            body: formData
+          });
+
+          if (res.ok) {
+            const jobRes = await res.json();
+            setActiveJobId(jobRes.job_id);
+            onJobCreated && onJobCreated();
+            loadVideo();
+          } else {
+            const err = await res.json().catch(() => ({}));
+            alert("Failed to submit job: " + (err.detail || "Server error"));
+          }
+        } catch (err) {
+          alert("Error: " + err.message);
+        } finally {
+          setIsSubmitting(false);
+        }
+      };
+
+      const handleOpenSeoPack = async (jobId, initialLang = "de") => {
+        setIsFetchingPack(true);
+        setActiveSeoLang(initialLang);
+        setIsSeoModalOpen(true);
+        try {
+          const res = await fetch(`/api/jobs/${jobId}/generate-seo-pack`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ lang: initialLang, gemini_api_key: geminiApiKey.trim() || undefined })
+          });
+          if (res.ok) {
+            const pack = await res.json();
+            setSeoPackData(pack);
+          }
+        } catch (e) {
+          console.error("Error fetching SEO pack:", e);
+        } finally {
+          setIsFetchingPack(false);
+        }
+      };
+
+      if (isLoading) {
+        return <div className="text-center py-16 text-slate-400">Loading video project details...</div>;
+      }
+
+      if (!video) {
+        return (
+          <div className="text-center py-16">
+            <p className="text-red-400 mb-4">Video project not found.</p>
+            <button type="button" onClick={onBack} className="px-4 py-2 bg-brand-600 text-white rounded-xl">
+              Back to Videos
+            </button>
+          </div>
+        );
+      }
+
+      const conversions = video.conversions || [];
+
+      return (
+        <div className="space-y-8">
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-6 border-b border-slate-800">
+            <div>
+              <button
+                type="button"
+                onClick={onBack}
+                className="text-xs font-semibold text-slate-400 hover:text-white mb-2 flex items-center transition"
+              >
+                <Icons.ArrowLeft />
+                <span>Back to Videos List</span>
+              </button>
+
+              <h2 className="text-2xl font-black text-white">{video.title}</h2>
+              <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs">
+                <span className="font-mono text-slate-400 bg-surface-900 px-2 py-0.5 rounded border border-white/5">
+                  ID: {video.id}
+                </span>
+
+                {video.youtube_url && (
+                  <a
+                    href={video.youtube_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-brand-400 hover:text-brand-300 font-semibold inline-flex items-center"
+                  >
+                    <span>View on YouTube</span>
+                    <Icons.ExternalLink />
+                  </a>
+                )}
+
+                <div className="flex items-center gap-1">
+                  {(video.languages || []).map(code => (
+                    <span
+                      key={code}
+                      className="px-2 py-0.5 rounded bg-surface-850 text-slate-300 font-bold border border-white/5 text-[11px]"
+                    >
+                      {LANG_MAP[code]?.flag} {code.toUpperCase()}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleDeleteVideoProject}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 border border-red-500/30 font-bold text-xs transition shadow-sm"
+                title="Delete this video project"
+              >
+                <Icons.Trash />
+                <span>Delete Video</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Active Job Real-Time Card */}
+          {activeJobId && (
+            <div className="glass-card rounded-2xl p-6 border border-brand-500/30 shadow-xl shadow-brand-500/10">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-brand-400 animate-ping"></span>
+                  <h3 className="font-bold text-white text-sm">Dubbing in Progress for this Video</h3>
+                </div>
+                <span className="text-xs text-brand-400 font-mono font-bold">
+                  {Math.round(jobProgress * 100)}%
+                </span>
+              </div>
+              <div className="w-full bg-surface-900 rounded-full h-2.5 overflow-hidden mb-2">
+                <div
+                  className="bg-brand-500 h-2.5 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.round(jobProgress * 100)}%` }}
+                ></div>
+              </div>
+              <p className="text-xs text-slate-300">{jobStep}</p>
+            </div>
+          )}
+
+          {/* SECTION 1: Dubbing Studio Form (Current Form) */}
+          <div className="glass-card rounded-2xl p-6 border border-white/10">
+            <div className="flex items-center justify-between mb-6 pb-4 border-b border-slate-800">
+              <div>
+                <h3 className="font-bold text-lg text-white">Conversion Studio</h3>
+                <p className="text-xs text-slate-400">
+                  Configure language, voices, and full video or multipart segmentation
+                </p>
+              </div>
+              <span className="text-xs px-3 py-1 rounded-full bg-brand-500/10 text-brand-400 font-bold border border-brand-500/20">
+                Studio Controls
+              </span>
+            </div>
+
+            <form onSubmit={handleStartDubbing} className="space-y-6">
+              {/* YouTube Link */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
+                  YouTube Video URL
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={youtubeUrl}
+                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  className="w-full px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-100 focus:border-brand-500 outline-none"
+                />
+              </div>
+
+              {/* Multi-language vs Single */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                      Target Language Mode
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer text-xs text-brand-400 font-semibold">
+                      <input
+                        type="checkbox"
+                        checked={isMultiLang}
+                        onChange={(e) => setIsMultiLang(e.target.checked)}
+                        className="rounded bg-surface-900 border-slate-700 text-brand-600 focus:ring-0"
+                      />
+                      <span>Multi-Dubbing</span>
+                    </label>
+                  </div>
+
+                  {!isMultiLang ? (
+                    <select
+                      value={targetLang}
+                      onChange={(e) => {
+                        setTargetLang(e.target.value);
+                        const vList = LANG_MAP[e.target.value]?.voices || [];
+                        if (vList.length > 0) setSelectedVoice(vList[0].id);
+                      }}
+                      className="w-full px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-100 outline-none"
+                    >
+                      {LANGUAGES.map(l => (
+                        <option key={l.code} value={l.code}>
+                          {l.flag} {l.name} ({l.native})
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="p-3 rounded-xl bg-surface-900 border border-slate-700 flex flex-wrap gap-2 max-h-36 overflow-y-auto">
+                      {LANGUAGES.map(l => {
+                        const isChecked = selectedLangs.includes(l.code);
+                        return (
+                          <button
+                            type="button"
+                            key={l.code}
+                            onClick={() => {
+                              setSelectedLangs(prev =>
+                                isChecked ? prev.filter(c => c !== l.code) : [...prev, l.code]
+                              );
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${isChecked ? 'bg-brand-600 text-white' : 'bg-surface-800 text-slate-400 hover:text-white'}`}
+                          >
+                            <span>{l.flag}</span>
+                            <span>{l.name}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Voice Selection */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
+                    Neural Voice Persona
+                  </label>
+                  <select
+                    value={selectedVoice}
+                    onChange={(e) => setSelectedVoice(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-100 outline-none"
+                  >
+                    {(LANG_MAP[targetLang]?.voices || []).map(v => (
+                      <option key={v.id} value={v.id}>
+                        {v.name} - {v.desc}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Single vs Multipart Split Mode */}
+              <div className="p-4 rounded-xl bg-surface-900/60 border border-white/5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="font-bold text-sm text-white">Full Video vs Multipart Split</h4>
+                    <p className="text-xs text-slate-400">
+                      Convert the entire video or split into distinct episodes/parts
+                    </p>
+                  </div>
+                  <div className="flex rounded-lg bg-surface-900 p-1 border border-slate-700">
+                    <button
+                      type="button"
+                      onClick={() => setSplitMode("full")}
+                      className={`px-3 py-1 rounded-md text-xs font-bold transition ${splitMode === 'full' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                    >
+                      Single Full Video
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSplitMode("parts")}
+                      className={`px-3 py-1 rounded-md text-xs font-bold transition ${splitMode === 'parts' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                    >
+                      Multipart Split
+                    </button>
+                  </div>
+                </div>
+
+                {splitMode === "parts" && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Part Duration: {partDurationMins} minutes
+                      </label>
+                      <input
+                        type="range"
+                        min="5"
+                        max="30"
+                        step="5"
+                        value={partDurationMins}
+                        onChange={(e) => setPartDurationMins(parseInt(e.target.value))}
+                        className="w-full accent-brand-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Select Part to Dub
+                      </label>
+                      <select
+                        value={selectedPartIndex}
+                        onChange={(e) => setSelectedPartIndex(parseInt(e.target.value))}
+                        className="w-full px-3 py-1.5 rounded-lg bg-surface-900 border border-slate-700 text-xs text-slate-100"
+                      >
+                        {partsList.map(p => (
+                          <option key={p.index} value={p.index}>
+                            {p.label} (Minutes: {Math.floor(p.start_seconds / 60)} - {Math.floor((p.start_seconds + p.duration_seconds) / 60)})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Submit Button */}
+              <div className="pt-2">
+                <button
+                  type="submit"
+                  disabled={isSubmitting || Boolean(activeJobId)}
+                  className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white font-bold text-sm shadow-xl shadow-brand-500/20 transition transform active:scale-95 disabled:opacity-50"
+                >
+                  {isSubmitting ? "Starting Dubbing Pipeline..." : `Start Conversion for ${splitMode === 'parts' ? `Part ${selectedPartIndex + 1}` : 'Full Video'}`}
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* SECTION 2: Converted Videos / Parts for this videoID */}
+          <div className="glass-card rounded-2xl p-6 border border-white/10">
+            <div className="flex items-center justify-between mb-6 pb-4 border-b border-slate-800">
+              <div>
+                <h3 className="font-bold text-lg text-white">Converted Videos & Parts ({conversions.length})</h3>
+                <p className="text-xs text-slate-400">
+                  All single or multipart conversions created inside this videoID section
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={loadVideo}
+                className="p-2 rounded-lg bg-surface-850 hover:bg-surface-700 text-slate-300 transition"
+                title="Reload conversions"
+              >
+                <Icons.Refresh />
+              </button>
+            </div>
+
+            {conversions.length === 0 ? (
+              <div className="text-center py-12 text-slate-500 text-xs">
+                No conversions completed yet for this video. Use the form above to run your first dubbing!
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {conversions.map((conv, idx) => (
+                  <div key={conv.job_id || idx} className="glass-panel rounded-xl p-5 border border-white/5 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="font-black text-sm text-white">{conv.part_name || "Full Video"}</span>
+                        <span className="text-[10px] text-slate-400 font-mono">Job: {conv.job_id}</span>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 uppercase">
+                        {conv.status || "Completed"}
+                      </span>
+                    </div>
+
+                    {/* Language badges */}
+                    <div className="flex items-center gap-1.5">
+                      {(conv.languages || []).map(l => (
+                        <span key={l} className="text-xs px-2 py-0.5 rounded bg-surface-800 text-slate-200 border border-white/5 font-semibold">
+                          {LANG_MAP[l]?.flag} {LANG_MAP[l]?.name || l.toUpperCase()}
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* Video Player */}
+                    {conv.output_video_url ? (
+                      <div className="rounded-xl overflow-hidden bg-black border border-white/10 aspect-video">
+                        <video
+                          controls
+                          className="w-full h-full object-contain"
+                          src={conv.output_video_url}
+                          preload="metadata"
+                        />
+                      </div>
+                    ) : (
+                      <div className="aspect-video bg-surface-900 rounded-xl flex items-center justify-center text-xs text-slate-500">
+                        Video rendering in background...
+                      </div>
+                    )}
+
+                    {/* Action Buttons */}
+                    <div className="flex flex-wrap items-center gap-2 pt-2">
+                      {conv.output_video_url && (
+                        <a
+                          href={conv.output_video_url}
+                          download
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-200 text-xs font-semibold transition"
+                        >
+                          <Icons.Download />
+                          <span>Download MP4</span>
+                        </a>
+                      )}
+
+                      {conv.zip_url && (
+                        <a
+                          href={conv.zip_url}
+                          download
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-200 text-xs font-semibold transition"
+                        >
+                          <Icons.Download />
+                          <span>ZIP Pack</span>
+                        </a>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => handleOpenSeoPack(conv.job_id, (conv.languages && conv.languages[0]) || "de")}
+                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition ml-auto"
+                      >
+                        SEO & Thumbnail Pack
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteConversion(conv.job_id, conv.part_name)}
+                        className="p-1.5 rounded-lg bg-surface-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 border border-white/5 transition"
+                        title="Delete this converted video"
+                      >
+                        <Icons.Trash />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* SEO & Thumbnail Pack Modal */}
+          {isSeoModalOpen && (
+            <SeoModal
+              isOpen={isSeoModalOpen}
+              onClose={() => setIsSeoModalOpen(false)}
+              seoData={seoPackData}
+              activeLang={activeSeoLang}
+              onLangChange={setActiveSeoLang}
+              isFetching={isFetchingPack}
+              copiedField={copiedField}
+              onCopy={(text, field) => {
+                navigator.clipboard.writeText(text);
+                setCopiedField(field);
+                setTimeout(() => setCopiedField(null), 2000);
+              }}
+            />
+          )}
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Modals: Add Video & Edit Video
+    // =========================================================================
+    function AddVideoModal({ onClose, onCreated }) {
+      const [title, setTitle] = useState("");
+      const [youtubeUrl, setYoutubeUrl] = useState("");
+      const [isFetchingInfo, setIsFetchingInfo] = useState(false);
+      const [isSaving, setIsSaving] = useState(false);
+
+      const handleFetchInfo = async () => {
+        if (!youtubeUrl.trim()) return;
+        setIsFetchingInfo(true);
+        try {
+          const res = await fetch("/api/video-info", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: youtubeUrl.trim() })
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.title && !title) setTitle(data.title);
+          }
+        } catch (e) {
+          console.error("Failed to fetch info:", e);
+        } finally {
+          setIsFetchingInfo(false);
+        }
+      };
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!title.trim() || !youtubeUrl.trim()) return;
+
+        setIsSaving(true);
+        try {
+          const res = await fetch("/api/videos", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: title.trim(),
+              youtube_url: youtubeUrl.trim()
+            })
+          });
+          if (res.ok) {
+            const created = await res.json();
+            onCreated(created);
+          } else {
+            alert("Failed to create video project.");
+          }
+        } catch (e) {
+          alert("Error: " + e.message);
+        } finally {
+          setIsSaving(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="glass-card rounded-2xl p-6 w-full max-w-lg border border-white/10 shadow-2xl">
+            <h3 className="text-lg font-bold text-white mb-1">Add New Video Project</h3>
+            <p className="text-xs text-slate-400 mb-6">
+              Create a new entry with title and YouTube link to organize multi-part or single dubs
+            </p>
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                  YouTube Video Link
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    required
+                    value={youtubeUrl}
+                    onChange={(e) => setYoutubeUrl(e.target.value)}
+                    placeholder="https://www.youtube.com/watch?v=..."
+                    className="flex-1 px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-100 outline-none focus:border-brand-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleFetchInfo}
+                    disabled={isFetchingInfo || !youtubeUrl}
+                    className="px-3 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-xs text-slate-200 font-semibold transition"
+                  >
+                    {isFetchingInfo ? "Fetching..." : "Fetch Info"}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Video Project Title
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="e.g. Solo Leveling Manhwa Recap Episode 1"
+                  className="w-full px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-100 outline-none focus:border-brand-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSaving}
+                  className="px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition shadow-lg shadow-brand-500/25"
+                >
+                  {isSaving ? "Creating..." : "Create & Open Studio"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function EditVideoModal({ video, onClose, onUpdated }) {
+      const [title, setTitle] = useState(video?.title || "");
+      const [youtubeUrl, setYoutubeUrl] = useState(video?.youtube_url || "");
+      const [isSaving, setIsSaving] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setIsSaving(true);
+        try {
+          const res = await fetch(`/api/videos/${video.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: title.trim(), youtube_url: youtubeUrl.trim() })
+          });
+          if (res.ok) {
+            onUpdated();
+          } else {
+            alert("Failed to update video.");
+          }
+        } catch (e) {
+          alert("Error: " + e.message);
+        } finally {
+          setIsSaving(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="glass-card rounded-2xl p-6 w-full max-w-lg border border-white/10 shadow-2xl">
+            <h3 className="text-lg font-bold text-white mb-1">Edit Video Project</h3>
+            <p className="text-xs text-slate-400 mb-6">Update video title or YouTube URL</p>
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Video Title
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-100 outline-none focus:border-brand-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                  YouTube Link
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={youtubeUrl}
+                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-100 outline-none focus:border-brand-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSaving}
+                  className="px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition"
+                >
+                  {isSaving ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function SeoModal({ isOpen, onClose, seoData, activeLang, onLangChange, isFetching, copiedField, onCopy }) {
+      if (!isOpen) return null;
+
+      const meta = (seoData?.metadata_by_lang && seoData.metadata_by_lang[activeLang]) || seoData?.metadata || {};
+      const thumbUrl = (seoData?.thumbnails_by_lang && seoData.thumbnails_by_lang[activeLang]) || seoData?.thumbnail_url;
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+          <div className="glass-card rounded-2xl p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto border border-white/10 shadow-2xl">
+            <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-800">
+              <h3 className="text-lg font-bold text-white">YouTube SEO & 1280x720 Thumbnail Pack</h3>
+              <button type="button" onClick={onClose} className="text-slate-400 hover:text-white font-bold text-lg">
+                ✕
+              </button>
+            </div>
+
+            {isFetching ? (
+              <div className="py-12 text-center text-slate-400 text-sm">Loading SEO Pack...</div>
+            ) : (
+              <div className="space-y-6">
+                {/* Thumbnail Preview */}
+                {thumbUrl && (
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
+                      1280x720 Thumbnail Preview
+                    </label>
+                    <div className="rounded-xl overflow-hidden border border-white/10 bg-black aspect-video max-w-md mx-auto">
+                      <img src={thumbUrl} alt="Thumbnail" className="w-full h-full object-cover" />
+                    </div>
+                  </div>
+                )}
+
+                {/* Title */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                      YouTube Video Title
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => onCopy(meta.title || "", "title")}
+                      className="text-xs text-brand-400 hover:text-brand-300 font-semibold"
+                    >
+                      {copiedField === "title" ? "Copied!" : "Copy Title"}
+                    </button>
+                  </div>
+                  <div className="p-3 rounded-xl bg-surface-900 border border-slate-700 text-sm text-slate-200">
+                    {meta.title || "Title pending generation"}
+                  </div>
+                </div>
+
+                {/* Description */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                      YouTube Description & Timestamps
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => onCopy(meta.description || "", "desc")}
+                      className="text-xs text-brand-400 hover:text-brand-300 font-semibold"
+                    >
+                      {copiedField === "desc" ? "Copied!" : "Copy Description"}
+                    </button>
+                  </div>
+                  <textarea
+                    readOnly
+                    rows="6"
+                    value={meta.description || ""}
+                    className="w-full p-3 rounded-xl bg-surface-900 border border-slate-700 text-xs text-slate-300 font-mono"
+                  />
+                </div>
+
+                {/* Tags */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                      YouTube Viral Tags
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => onCopy(meta.tags || "", "tags")}
+                      className="text-xs text-brand-400 hover:text-brand-300 font-semibold"
+                    >
+                      {copiedField === "tags" ? "Copied!" : "Copy Tags"}
+                    </button>
+                  </div>
+                  <div className="p-3 rounded-xl bg-surface-900 border border-slate-700 text-xs text-slate-300">
+                    {meta.tags || "No tags generated"}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // YTD Helper Functions
+    // =========================================================================
+    function formatYtdDuration(seconds) {
+      if (!seconds || seconds <= 0) return "--:--";
+      const secNum = parseInt(seconds, 10);
+      const hours = Math.floor(secNum / 3600);
+      const minutes = Math.floor((secNum % 3600) / 60);
+      const secs = secNum % 60;
+      if (hours > 0) {
+        return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      }
+      return `${minutes}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    // =========================================================================
+    // YTD Channels View Component
+    // =========================================================================
+    function YtdChannelsView({
+      channels,
+      stats,
+      isLoading,
+      onRefresh,
+      onOpenAddModal,
+      onOpenDetails,
+      onEditChannel,
+      onDeleteChannel,
+      onSyncChannel
+    }) {
+      const [searchTerm, setSearchTerm] = useState("");
+      const [syncingId, setSyncingId] = useState(null);
+
+      const handleSync = async (id) => {
+        setSyncingId(id);
+        await onSyncChannel(id);
+        setSyncingId(null);
+      };
+
+      const filteredChannels = (channels || []).filter(c => {
+        const query = searchTerm.toLowerCase();
+        return (c.title || "").toLowerCase().includes(query) || (c.url || "").toLowerCase().includes(query);
+      });
+
+      return (
+        <div className="space-y-8 animate-fadeIn">
+          {/* Header Banner */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-6 rounded-2xl glass-card border border-white/5 bg-gradient-to-r from-surface-900 via-surface-850 to-red-950/20">
+            <div>
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="p-1.5 rounded-lg bg-red-600/20 text-red-400 border border-red-500/30">
+                  <Icons.Youtube />
+                </span>
+                <span className="text-xs font-bold text-red-400 uppercase tracking-widest">
+                  YouTube Downloader (YTD)
+                </span>
+              </div>
+              <h2 className="text-2xl font-black text-white tracking-tight">Connected Channels</h2>
+              <p className="text-xs text-slate-400 mt-1 max-w-xl">
+                Track YouTube channels, sync published videos, download full MP4 files, slice long videos into 2/5/9 min series, or render vertical shorts.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={onRefresh}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-200 text-xs font-semibold transition border border-white/10"
+              >
+                <Icons.Refresh />
+                <span>Refresh</span>
+              </button>
+              <button
+                type="button"
+                onClick={onOpenAddModal}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white text-xs font-bold shadow-lg shadow-red-500/25 transition"
+              >
+                <Icons.Plus />
+                <span>Add Channel</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Quick Metrics Bar */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="p-4 rounded-xl glass-panel border border-white/5">
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Channels</span>
+              <div className="text-2xl font-black text-white mt-1">{channels.length}</div>
+            </div>
+            <div className="p-4 rounded-xl glass-panel border border-white/5">
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Total Videos</span>
+              <div className="text-2xl font-black text-brand-400 mt-1">{stats?.total_videos || 0}</div>
+            </div>
+            <div className="p-4 rounded-xl glass-panel border border-white/5">
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Downloaded</span>
+              <div className="text-2xl font-black text-emerald-400 mt-1">{stats?.downloaded_videos || 0}</div>
+            </div>
+            <div className="p-4 rounded-xl glass-panel border border-white/5">
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Shorts Generated</span>
+              <div className="text-2xl font-black text-purple-400 mt-1">{stats?.shorts_count || 0}</div>
+            </div>
+          </div>
+
+          {/* Search Bar */}
+          <div className="flex items-center justify-between gap-4">
+            <div className="relative flex-1 max-w-md">
+              <input
+                type="text"
+                placeholder="Search channels by title or URL..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700/80 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500"
+              />
+            </div>
+            <span className="text-xs text-slate-500 font-medium">
+              Showing {filteredChannels.length} of {channels.length} channels
+            </span>
+          </div>
+
+          {/* Channels Grid / List */}
+          {isLoading && channels.length === 0 ? (
+            <div className="flex flex-col items-center justify-center p-16 text-slate-400">
+              <div className="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+              <p className="text-xs">Loading channels...</p>
+            </div>
+          ) : filteredChannels.length === 0 ? (
+            <div className="p-16 rounded-2xl glass-card border border-white/5 text-center flex flex-col items-center justify-center">
+              <div className="w-14 h-14 rounded-2xl bg-red-600/10 text-red-400 flex items-center justify-center mb-4">
+                <Icons.Youtube />
+              </div>
+              <h3 className="text-base font-bold text-white mb-1">
+                {searchTerm ? "No matching channels" : "No YouTube channels added yet"}
+              </h3>
+              <p className="text-xs text-slate-400 max-w-sm mb-6">
+                {searchTerm ? "Try adjusting your search query." : "Add a YouTube channel URL or @handle to start tracking and downloading videos."}
+              </p>
+              {!searchTerm && (
+                <button
+                  type="button"
+                  onClick={onOpenAddModal}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition shadow-lg shadow-red-500/20"
+                >
+                  <Icons.Plus />
+                  <span>Add First Channel</span>
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {filteredChannels.map((ch) => (
+                <div
+                  key={ch.id}
+                  className="p-5 rounded-2xl glass-card border border-white/5 hover:border-red-500/30 flex flex-col justify-between transition-all duration-300 group shadow-lg"
+                >
+                  <div>
+                    {/* Channel Header */}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3 overflow-hidden">
+                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-red-600 to-rose-700 flex items-center justify-center text-white font-black text-sm flex-shrink-0 shadow-md shadow-red-600/30">
+                          <Icons.Youtube />
+                        </div>
+                        <div className="overflow-hidden">
+                          <h4 className="font-bold text-white text-sm truncate group-hover:text-red-400 transition">
+                            {ch.title || "Untitled Channel"}
+                          </h4>
+                          <a
+                            href={ch.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 truncate font-mono mt-0.5"
+                          >
+                            <span className="truncate">{ch.url}</span>
+                            <Icons.ExternalLink />
+                          </a>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Channel Stats Row */}
+                    <div className="grid grid-cols-2 gap-2 mt-4 pt-4 border-t border-white/5 text-xs">
+                      <div className="p-2 rounded-lg bg-surface-900 border border-white/5">
+                        <span className="text-[10px] text-slate-400 uppercase font-semibold">Videos</span>
+                        <div className="font-bold text-slate-200 mt-0.5">{ch.video_count || 0}</div>
+                      </div>
+                      <div className="p-2 rounded-lg bg-surface-900 border border-white/5">
+                        <span className="text-[10px] text-slate-400 uppercase font-semibold">Downloaded</span>
+                        <div className="font-bold text-emerald-400 mt-0.5">{ch.downloaded_count || 0}</div>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 text-[10px] text-slate-500 flex items-center justify-between">
+                      <span>Last Synced:</span>
+                      <span className="font-medium text-slate-400">
+                        {ch.last_synced_at ? new Date(ch.last_synced_at).toLocaleString() : "Never"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Actions Bar */}
+                  <div className="flex items-center gap-2 mt-5 pt-3 border-t border-white/5">
+                    <button
+                      type="button"
+                      onClick={() => onOpenDetails(ch.id)}
+                      className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition shadow-sm shadow-brand-500/20"
+                    >
+                      <Icons.Details />
+                      <span>Details</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      title="Sync all channel videos"
+                      disabled={syncingId === ch.id}
+                      onClick={() => handleSync(ch.id)}
+                      className={`p-2 rounded-xl border border-white/10 transition ${syncingId === ch.id ? 'bg-red-500/20 text-red-300 animate-spin' : 'bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white'}`}
+                    >
+                      <Icons.Refresh />
+                    </button>
+
+                    <button
+                      type="button"
+                      title="Edit channel details"
+                      onClick={() => onEditChannel(ch)}
+                      className="p-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white border border-white/10 transition"
+                    >
+                      <Icons.Edit />
+                    </button>
+
+                    <button
+                      type="button"
+                      title="Delete channel"
+                      onClick={() => onDeleteChannel(ch.id, ch.title)}
+                      className="p-2 rounded-xl bg-surface-800 hover:bg-red-500/20 text-slate-300 hover:text-red-400 border border-white/10 transition"
+                    >
+                      <Icons.Trash />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // YTD Channel Details View Component
+    // =========================================================================
+    function YtdChannelDetailsView({
+      channelId,
+      onBack,
+      onDownloadVideo,
+      onDeleteVideo,
+      onSyncChannel
+    }) {
+      const [channel, setChannel] = useState(null);
+      const [videos, setVideos] = useState([]);
+      const [isLoading, setIsLoading] = useState(true);
+      const [isSyncing, setIsSyncing] = useState(false);
+      const [searchQuery, setSearchQuery] = useState("");
+      const [statusFilter, setStatusFilter] = useState("all");
+
+      const loadChannelAndVideos = async () => {
+        try {
+          const [chRes, vidsRes] = await Promise.all([
+            fetch(`/api/ytd/channels/${channelId}`),
+            fetch(`/api/ytd/channels/${channelId}/videos?limit=250`)
+          ]);
+          if (chRes.ok) {
+            setChannel(await chRes.json());
+          }
+          if (vidsRes.ok) {
+            const vidsData = await vidsRes.json();
+            setVideos(Array.isArray(vidsData) ? vidsData : (vidsData.videos || []));
+          }
+        } catch (err) {
+          console.error("Failed to load channel videos:", err);
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      useEffect(() => {
+        loadChannelAndVideos();
+      }, [channelId]);
+
+      // Polling for active background downloads
+      useEffect(() => {
+        const hasActive = (videos || []).some(v => ['queued', 'downloading', 'splitting', 'generating_shorts'].includes(v.download_status));
+        if (!hasActive) return;
+
+        const interval = setInterval(async () => {
+          try {
+            const res = await fetch(`/api/ytd/channels/${channelId}/videos?limit=250`);
+            if (res.ok) {
+              const fresh = await res.json();
+              setVideos(Array.isArray(fresh) ? fresh : (fresh.videos || []));
+            }
+          } catch (e) {
+            console.error("Polling error:", e);
+          }
+        }, 3000);
+
+        return () => clearInterval(interval);
+      }, [channelId, videos]);
+
+      const handleManualSync = async () => {
+        setIsSyncing(true);
+        try {
+          await onSyncChannel(channelId);
+          await loadChannelAndVideos();
+        } finally {
+          setIsSyncing(false);
+        }
+      };
+
+      const handleDelete = async (vid) => {
+        const success = await onDeleteVideo(vid.id, vid.title);
+        if (success) {
+          setVideos(prev => prev.filter(v => v.id !== vid.id));
+        }
+      };
+
+      // Filtered videos
+      const filteredVideos = (videos || []).filter(v => {
+        const matchesSearch =
+          (v.title || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+          (v.youtube_id || "").toLowerCase().includes(searchQuery.toLowerCase());
+
+        if (!matchesSearch) return false;
+        if (statusFilter === "downloaded") return Boolean(v.is_downloaded);
+        if (statusFilter === "not_downloaded") return !v.is_downloaded;
+        return true;
+      });
+
+      const downloadedCount = (videos || []).filter(v => Boolean(v.is_downloaded)).length;
+
+      return (
+        <div className="space-y-6 animate-fadeIn">
+          {/* Top Bar Navigation */}
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={onBack}
+              className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-surface-900 hover:bg-surface-850 text-slate-300 hover:text-white border border-white/5 text-xs font-semibold transition"
+            >
+              <Icons.ArrowLeft />
+              <span>Back to All Channels</span>
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleManualSync}
+                disabled={isSyncing}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition shadow-lg shadow-red-500/25 ${isSyncing ? 'opacity-70 cursor-not-allowed' : ''}`}
+              >
+                <span className={isSyncing ? "animate-spin" : ""}>
+                  <Icons.Refresh />
+                </span>
+                <span>{isSyncing ? "Syncing Videos..." : "Sync Channel Now"}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Channel Banner Card */}
+          <div className="p-6 rounded-2xl glass-card border border-white/5 bg-gradient-to-r from-surface-900 via-surface-850 to-red-950/20 flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div className="flex items-center gap-4 overflow-hidden">
+              <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-red-600 to-rose-600 flex items-center justify-center text-white text-xl font-black shadow-lg shadow-red-600/30 flex-shrink-0">
+                <Icons.Youtube />
+              </div>
+              <div className="overflow-hidden">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20 uppercase tracking-widest">
+                    Tracked Channel
+                  </span>
+                  {channel?.last_synced_at && (
+                    <span className="text-[10px] text-slate-500">
+                      Synced {new Date(channel.last_synced_at).toLocaleTimeString()}
+                    </span>
+                  )}
+                </div>
+                <h2 className="text-xl font-black text-white truncate mt-1">
+                  {channel?.title || "Channel Videos"}
+                </h2>
+                {channel?.url && (
+                  <a
+                    href={channel.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 font-mono mt-0.5 truncate"
+                  >
+                    <span className="truncate">{channel.url}</span>
+                    <Icons.ExternalLink />
+                  </a>
+                )}
+              </div>
+            </div>
+
+            {/* Quick Metrics */}
+            <div className="flex items-center gap-3">
+              <div className="px-4 py-2.5 rounded-xl bg-surface-900 border border-white/5 text-center">
+                <div className="text-[10px] font-bold text-slate-400 uppercase">Total Videos</div>
+                <div className="text-lg font-black text-white mt-0.5">{videos.length}</div>
+              </div>
+              <div className="px-4 py-2.5 rounded-xl bg-surface-900 border border-white/5 text-center">
+                <div className="text-[10px] font-bold text-slate-400 uppercase">Downloaded</div>
+                <div className="text-lg font-black text-emerald-400 mt-0.5">{downloadedCount}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Filter Bar */}
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="relative w-full sm:w-80">
+              <input
+                type="text"
+                placeholder="Search videos by title or ID..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full px-4 py-2 rounded-xl bg-surface-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-red-500"
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5 p-1 rounded-xl bg-surface-900 border border-white/5 text-xs self-stretch sm:self-auto">
+              <button
+                type="button"
+                onClick={() => setStatusFilter("all")}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition ${statusFilter === 'all' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+              >
+                All ({videos.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter("downloaded")}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition ${statusFilter === 'downloaded' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+              >
+                Downloaded ({downloadedCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter("not_downloaded")}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition ${statusFilter === 'not_downloaded' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+              >
+                Not Downloaded ({videos.length - downloadedCount})
+              </button>
+            </div>
+          </div>
+
+          {/* Video List */}
+          {isLoading ? (
+            <div className="flex flex-col items-center justify-center p-16 text-slate-400">
+              <div className="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+              <p className="text-xs">Loading channel videos...</p>
+            </div>
+          ) : filteredVideos.length === 0 ? (
+            <div className="p-16 rounded-2xl glass-card border border-white/5 text-center flex flex-col items-center justify-center">
+              <div className="w-12 h-12 rounded-2xl bg-red-600/10 text-red-400 flex items-center justify-center mb-3">
+                <Icons.Youtube />
+              </div>
+              <h3 className="text-sm font-bold text-white mb-1">No videos found</h3>
+              <p className="text-xs text-slate-400 max-w-sm mb-4">
+                {searchQuery ? "No videos match your search query." : "No videos have been synced for this channel yet."}
+              </p>
+              {!searchQuery && (
+                <button
+                  type="button"
+                  onClick={handleManualSync}
+                  className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition"
+                >
+                  Sync Videos Now
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {filteredVideos.map((vid) => {
+                const isProcessing = ['queued', 'downloading', 'splitting', 'generating_shorts'].includes(vid.download_status);
+
+                return (
+                  <div
+                    key={vid.id}
+                    className="p-4 rounded-xl glass-card border border-white/5 hover:border-slate-700 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition group"
+                  >
+                    {/* Video Info Left */}
+                    <div className="flex items-start gap-4 overflow-hidden flex-1">
+                      {/* Thumbnail / Badge */}
+                      <div className="relative w-28 h-16 rounded-lg bg-surface-900 border border-white/10 flex-shrink-0 overflow-hidden group-hover:border-red-500/40 transition">
+                        {vid.thumbnail ? (
+                          <img src={vid.thumbnail} alt={vid.title} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-red-500 bg-surface-850">
+                            <Icons.Youtube />
+                          </div>
+                        )}
+                        {vid.duration_seconds > 0 && (
+                          <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono text-white">
+                            {formatYtdDuration(vid.duration_seconds)}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Title & Link */}
+                      <div className="overflow-hidden flex-1">
+                        <h4 className="font-bold text-white text-sm line-clamp-1 group-hover:text-red-400 transition" title={vid.title}>
+                          {vid.title}
+                        </h4>
+                        <div className="flex flex-wrap items-center gap-2 mt-1">
+                          <a
+                            href={vid.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 font-mono"
+                          >
+                            <span>Watch on YouTube</span>
+                            <Icons.ExternalLink />
+                          </a>
+                          {vid.published_at && (
+                            <span className="text-[10px] text-slate-500">
+                              • {vid.published_at.substring(0, 10)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Middle: Download Status Badge */}
+                    <div className="flex items-center gap-3 lg:px-4">
+                      {isProcessing ? (
+                        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-semibold">
+                          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+                          <span className="capitalize">{vid.download_status.replace('_', ' ')}...</span>
+                        </div>
+                      ) : vid.is_downloaded ? (
+                        <div className="flex flex-col items-start lg:items-end">
+                          <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold flex items-center gap-1">
+                            <span>✓</span>
+                            <span>Downloaded</span>
+                          </span>
+                          <span className="text-[10px] text-slate-400 mt-0.5 uppercase tracking-wider font-semibold">
+                            {vid.download_type === 'splits' ? 'Splits (ZIP)' : vid.download_type === 'shorts' ? 'Shorts (ZIP)' : 'Full MP4'}
+                            {vid.file_size_mb ? ` • ${vid.file_size_mb} MB` : ''}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="px-2.5 py-1 rounded-full bg-slate-800 text-slate-400 border border-white/5 text-xs font-medium">
+                          Not Downloaded
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Right: Actions */}
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {/* Download Modal Trigger */}
+                      <button
+                        type="button"
+                        disabled={isProcessing}
+                        onClick={() => onDownloadVideo(vid)}
+                        className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition shadow-sm ${vid.is_downloaded ? 'bg-surface-800 hover:bg-surface-700 text-slate-200 border border-white/10' : 'bg-red-600 hover:bg-red-500 text-white shadow-red-500/20'}`}
+                      >
+                        <Icons.Download />
+                        <span>{vid.is_downloaded ? "Re-download" : "Download"}</span>
+                      </button>
+
+                      {/* Direct File Download if available on disk */}
+                      {Boolean(vid.is_downloaded) && (
+                        <a
+                          href={`/api/ytd/videos/${vid.id}/file`}
+                          download
+                          title="Save downloaded file to computer"
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-semibold transition"
+                        >
+                          <Icons.Download />
+                          <span>Save File</span>
+                        </a>
+                      )}
+
+                      {/* Delete Video Button */}
+                      <button
+                        type="button"
+                        title="Delete video & blacklist from sync"
+                        onClick={() => handleDelete(vid)}
+                        className="p-2 rounded-xl bg-surface-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 border border-white/10 transition"
+                      >
+                        <Icons.Trash />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Add Channel Modal Component
+    // =========================================================================
+    function AddChannelModal({ onClose, onCreated }) {
+      const [title, setTitle] = useState("");
+      const [url, setUrl] = useState("");
+      const [autoSync, setAutoSync] = useState(true);
+      const [isLoading, setIsLoading] = useState(false);
+      const [error, setError] = useState("");
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!url.trim()) {
+          setError("Please provide a YouTube channel URL or @handle.");
+          return;
+        }
+        setIsLoading(true);
+        setError("");
+
+        try {
+          const res = await fetch("/api/ytd/channels", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: url.trim(),
+              title: title.trim(),
+              auto_sync: autoSync
+            })
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            onCreated(data);
+          } else {
+            const err = await res.json().catch(() => ({}));
+            setError(err.detail || "Failed to add channel.");
+          }
+        } catch (err) {
+          setError(err.message || "Network error occurred.");
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-lg p-6 rounded-2xl glass-card border border-white/10 bg-surface-900 shadow-2xl">
+            <div className="flex items-center justify-between pb-4 border-b border-white/5">
+              <div className="flex items-center gap-2">
+                <span className="p-2 rounded-xl bg-red-600/20 text-red-400 border border-red-500/30">
+                  <Icons.Youtube />
+                </span>
+                <div>
+                  <h3 className="text-base font-black text-white">Add YouTube Channel</h3>
+                  <p className="text-xs text-slate-400">Track and download videos from a channel</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onClose}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-surface-800 transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            {error && (
+              <div className="mt-4 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-400">
+                {error}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="mt-5 space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Channel URL or @Handle <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="https://www.youtube.com/@veritasium or @veritasium"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl bg-surface-850 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-red-500"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Supports custom handles (@channel), channel URLs, or user URLs.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Channel Title (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Veritasium (leave blank to auto-detect)"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl bg-surface-850 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-red-500"
+                />
+              </div>
+
+              <div className="pt-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={autoSync}
+                    onChange={(e) => setAutoSync(e.target.checked)}
+                    className="w-4 h-4 rounded text-red-600 bg-surface-850 border-slate-700 focus:ring-red-500 focus:ring-offset-surface-900"
+                  />
+                  <span className="text-xs text-slate-300 font-medium">
+                    Automatically sync videos immediately after adding
+                  </span>
+                </label>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-white/5">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-4 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-semibold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className={`flex items-center gap-2 px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition shadow-lg shadow-red-500/25 ${isLoading ? 'opacity-70 cursor-not-allowed' : ''}`}
+                >
+                  {isLoading && <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}
+                  <span>{isLoading ? "Adding Channel..." : "Add Channel"}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Edit Channel Modal Component
+    // =========================================================================
+    function EditChannelModal({ channel, onClose, onUpdated }) {
+      const [title, setTitle] = useState(channel?.title || "");
+      const [url, setUrl] = useState(channel?.url || "");
+      const [isLoading, setIsLoading] = useState(false);
+      const [error, setError] = useState("");
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setIsLoading(true);
+        setError("");
+
+        try {
+          const res = await fetch(`/api/ytd/channels/${channel.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: title.trim(),
+              url: url.trim()
+            })
+          });
+
+          if (res.ok) {
+            onUpdated();
+          } else {
+            const err = await res.json().catch(() => ({}));
+            setError(err.detail || "Failed to update channel.");
+          }
+        } catch (err) {
+          setError(err.message || "Network error occurred.");
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-lg p-6 rounded-2xl glass-card border border-white/10 bg-surface-900 shadow-2xl">
+            <div className="flex items-center justify-between pb-4 border-b border-white/5">
+              <div className="flex items-center gap-2">
+                <span className="p-2 rounded-xl bg-brand-600/20 text-brand-400 border border-brand-500/30">
+                  <Icons.Edit />
+                </span>
+                <div>
+                  <h3 className="text-base font-black text-white">Edit Channel Details</h3>
+                  <p className="text-xs text-slate-400">Update channel title or URL</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onClose}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-surface-800 transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            {error && (
+              <div className="mt-4 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-400">
+                {error}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="mt-5 space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Channel Title
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl bg-surface-850 border border-slate-700 text-xs text-white focus:outline-none focus:border-brand-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Channel URL
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl bg-surface-850 border border-slate-700 text-xs text-white focus:outline-none focus:border-brand-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-white/5">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-4 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-semibold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className={`flex items-center gap-2 px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition ${isLoading ? 'opacity-70 cursor-not-allowed' : ''}`}
+                >
+                  {isLoading && <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}
+                  <span>{isLoading ? "Saving..." : "Save Changes"}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // YTD Video Download Modal (Full, Splits, Shorts)
+    // =========================================================================
+    function YtdDownloadModal({ video, onClose, onDownloadStarted }) {
+      // downloadType: "full" | "splits" | "shorts"
+      const [downloadType, setDownloadType] = useState("full");
+      // partDurationMins: 2 | 5 | 9
+      const [partDurationMins, setPartDurationMins] = useState(5);
+      // numShorts: number
+      const [numShorts, setNumShorts] = useState(3);
+      const [isLoading, setIsLoading] = useState(false);
+      const [error, setError] = useState("");
+
+      const handleStartDownload = async () => {
+        setIsLoading(true);
+        setError("");
+
+        try {
+          const res = await fetch(`/api/ytd/videos/${video.id}/download`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              download_type: downloadType,
+              part_duration_mins: partDurationMins,
+              num_shorts: numShorts
+            })
+          });
+
+          if (res.ok) {
+            onDownloadStarted();
+            onClose();
+          } else {
+            const err = await res.json().catch(() => ({}));
+            setError(err.detail || "Failed to start download.");
+          }
+        } catch (err) {
+          setError(err.message || "Network error occurred.");
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-xl p-6 rounded-2xl glass-card border border-white/10 bg-surface-900 shadow-2xl">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-white/5">
+              <div className="flex items-center gap-2.5">
+                <span className="p-2 rounded-xl bg-red-600/20 text-red-400 border border-red-500/30">
+                  <Icons.Download />
+                </span>
+                <div>
+                  <h3 className="text-base font-black text-white">Download Video Options</h3>
+                  <p className="text-xs text-slate-400">Choose output format, splits, or vertical shorts</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onClose}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-surface-800 transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Video Preview Card */}
+            <div className="mt-4 p-3.5 rounded-xl bg-surface-850 border border-white/5 flex items-center gap-3">
+              <div className="w-16 h-10 rounded-lg bg-surface-900 overflow-hidden flex-shrink-0 flex items-center justify-center text-red-400">
+                {video.thumbnail ? (
+                  <img src={video.thumbnail} alt={video.title} className="w-full h-full object-cover" />
+                ) : (
+                  <Icons.Youtube />
+                )}
+              </div>
+              <div className="overflow-hidden flex-1">
+                <h4 className="text-xs font-bold text-white truncate">{video.title}</h4>
+                <div className="flex items-center gap-2 text-[10px] text-slate-400 mt-0.5">
+                  <span>Duration: {formatYtdDuration(video.duration_seconds)}</span>
+                  <span>•</span>
+                  <span>ID: {video.youtube_id}</span>
+                </div>
+              </div>
+            </div>
+
+            {error && (
+              <div className="mt-4 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-400">
+                {error}
+              </div>
+            )}
+
+            {/* Download Option Selectors */}
+            <div className="mt-5 space-y-3">
+              {/* Option 1: Full Video */}
+              <div
+                onClick={() => setDownloadType("full")}
+                className={`p-4 rounded-xl border cursor-pointer transition flex items-start gap-3.5 ${downloadType === 'full' ? 'bg-red-500/10 border-red-500 shadow-md shadow-red-500/10' : 'bg-surface-850 border-white/5 hover:border-slate-700'}`}
+              >
+                <div className={`w-4 h-4 rounded-full mt-0.5 border flex items-center justify-center ${downloadType === 'full' ? 'border-red-500 bg-red-500' : 'border-slate-500'}`}>
+                  {downloadType === 'full' && <div className="w-1.5 h-1.5 rounded-full bg-white"></div>}
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-white">Full Video (Original MP4)</span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-surface-900 text-slate-300 border border-white/5 uppercase">
+                      Single MP4
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Downloads the complete original high-resolution YouTube video with full audio track intact.
+                  </p>
+                </div>
+              </div>
+
+              {/* Option 2: Splits */}
+              <div
+                onClick={() => setDownloadType("splits")}
+                className={`p-4 rounded-xl border cursor-pointer transition flex items-start gap-3.5 ${downloadType === 'splits' ? 'bg-red-500/10 border-red-500 shadow-md shadow-red-500/10' : 'bg-surface-850 border-white/5 hover:border-slate-700'}`}
+              >
+                <div className={`w-4 h-4 rounded-full mt-0.5 border flex items-center justify-center ${downloadType === 'splits' ? 'border-red-500 bg-red-500' : 'border-slate-500'}`}>
+                  {downloadType === 'splits' && <div className="w-1.5 h-1.5 rounded-full bg-white"></div>}
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <Icons.Scissors />
+                      <span className="text-sm font-bold text-white">Splits (Multi-Part Video Series)</span>
+                    </div>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-surface-900 text-slate-300 border border-white/5 uppercase">
+                      ZIP Archive
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Splits the video into equal-length parts packaged into a ZIP archive for serial multi-part posts.
+                  </p>
+
+                  {/* Sub-option: Duration options (2, 5, 9 mins) */}
+                  {downloadType === "splits" && (
+                    <div className="mt-3 pt-3 border-t border-white/10" onClick={(e) => e.stopPropagation()}>
+                      <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-300 mb-2">
+                        Select Split Duration:
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {[2, 5, 9].map((mins) => (
+                          <button
+                            key={mins}
+                            type="button"
+                            onClick={() => setPartDurationMins(mins)}
+                            className={`py-2 px-3 rounded-lg text-xs font-bold transition border ${partDurationMins === mins ? 'bg-red-600 text-white border-red-500 shadow-sm' : 'bg-surface-900 text-slate-300 border-white/5 hover:bg-surface-800'}`}
+                          >
+                            {mins} mins
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Option 3: Shorts */}
+              <div
+                onClick={() => setDownloadType("shorts")}
+                className={`p-4 rounded-xl border cursor-pointer transition flex items-start gap-3.5 ${downloadType === 'shorts' ? 'bg-red-500/10 border-red-500 shadow-md shadow-red-500/10' : 'bg-surface-850 border-white/5 hover:border-slate-700'}`}
+              >
+                <div className={`w-4 h-4 rounded-full mt-0.5 border flex items-center justify-center ${downloadType === 'shorts' ? 'border-red-500 bg-red-500' : 'border-slate-500'}`}>
+                  {downloadType === 'shorts' && <div className="w-1.5 h-1.5 rounded-full bg-white"></div>}
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-white">Shorts (AI Climax 9:16 Vertical)</span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-surface-900 text-slate-300 border border-white/5 uppercase">
+                      Vertical Reels ZIP
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Detects top scene climaxes and renders vertical 9:16 shorts with ambient wings packaged in a ZIP.
+                  </p>
+
+                  {/* Sub-option: Number of shorts */}
+                  {downloadType === "shorts" && (
+                    <div className="mt-3 pt-3 border-t border-white/10" onClick={(e) => e.stopPropagation()}>
+                      <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-300 mb-2">
+                        Number of Shorts to Generate:
+                      </label>
+                      <div className="flex items-center gap-2">
+                        {[1, 2, 3, 5, 8].map((num) => (
+                          <button
+                            key={num}
+                            type="button"
+                            onClick={() => setNumShorts(num)}
+                            className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition border ${numShorts === num ? 'bg-red-600 text-white border-red-500 shadow-sm' : 'bg-surface-900 text-slate-300 border-white/5 hover:bg-surface-800'}`}
+                          >
+                            {num}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Buttons */}
+            <div className="flex items-center justify-end gap-3 pt-5 mt-5 border-t border-white/5">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2.5 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isLoading}
+                onClick={handleStartDownload}
+                className={`flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white text-xs font-bold shadow-lg shadow-red-500/25 transition ${isLoading ? 'opacity-70 cursor-not-allowed' : ''}`}
+              >
+                {isLoading && <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}
+                <Icons.Download />
+                <span>{isLoading ? "Starting Process..." : "Start Download"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

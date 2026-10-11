@@ -1,0 +1,41 @@
+# ==============================================================================
+# DubFlow Studio - Requirements for Cloud VMs (Linux/NVIDIA CUDA/CPU) & macOS
+# ==============================================================================
+
+psutil>=5.9.0
+
+# Core PyTorch (Metal Performance Shaders accelerated)
+torch>=2.2.0
+torchaudio>=2.2.0
+
+# Step 1: Audio Demixing & Vocal Separation
+demucs>=4.0.1
+yt-dlp>=2024.4.9
+
+# Step 2: Timed Transcription (Optimized for Apple Silicon CPU NEON vectorization)
+faster-whisper>=1.0.0
+
+# Step 3: Text Translation
+deep-translator>=1.11.4
+transformers>=4.40.0
+sentencepiece>=0.2.0
+
+# Step 4: Text-to-Speech & Audio Timeline Processing
+edge-tts>=6.1.12
+soundfile>=0.12.1
+scipy>=1.12.0
+numpy>=1.26.0
+Pillow>=10.0.0
+
+# Optional: Voice Cloning via Coqui XTTS-v2
+# Uncomment to enable zero-shot voice cloning
+# TTS>=0.22.0
+
+# Step 5: Web UI & CLI Visuals
+gradio>=4.30.0
+rich>=13.7.0
+
+# Step 6: FastAPI REST API & Async Server
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+python-multipart>=0.0.9

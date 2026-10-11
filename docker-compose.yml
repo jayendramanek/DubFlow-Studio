@@ -1,0 +1,30 @@
+services:
+  dubflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dubflow-studio
+    restart: unless-stopped
+    ports:
+      - "3333:3333"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3333
+      - DUBFLOW_EMAIL=${DUBFLOW_EMAIL:-admin@admin.com}
+      - DUBFLOW_PASSWORD=${DUBFLOW_PASSWORD:-admin@1994}
+    volumes:
+      # Persistent storage: videos database, conversion jobs, and files remain safe on host disk
+      - ./workspace_api:/app/workspace_api
+      # Environment credentials
+      - ./.env:/app/.env:ro
+    # Log rotation prevents container logs from filling VM disk space
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    # Optional resource limits suitable for 8 GB RAM VM (leaves buffer for host OS)
+    deploy:
+      resources:
+        limits:
+          memory: 7200M

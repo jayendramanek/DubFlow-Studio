@@ -1,0 +1,2165 @@
+"""
+ManhwaDub - Local AI Video Dubbing Pipeline for Apple Silicon (M1 Pro/Max)
+===========================================================================
+A clean, modular local AI automation pipeline that dubs English videos
+(e.g., Manhwa recaps / motion comics) into Spanish, preserving background
+music and sound effects.
+
+Hardware Acceleration:
+- PyTorch Metal Performance Shaders (device = 'mps')
+- Optimized CPU execution via Apple Accelerate & NEON SIMD for Whisper & CTranslate2
+"""
+
+import os
+import sys
+import json
+import shutil
+import logging
+import subprocess
+import asyncio
+import zipfile
+import platform
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple, Callable
+
+# Ensure PyTorch MPS Fallback is active before importing torch if on macOS
+if platform.system() == "Darwin":
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("DubFlow")
+
+
+# ============================================================================
+# Device & Hardware Optimization Manager (Dynamic for Cloud VMs & Local OS)
+# ============================================================================
+
+class HardwareAccelerationManager:
+    """Detects and dynamically configures hardware acceleration for Linux Cloud VMs (NVIDIA CUDA / CPU), macOS (Apple Silicon MPS), and Windows."""
+
+    @staticmethod
+    def get_torch_device() -> str:
+        """
+        Determines the optimal PyTorch device dynamically.
+        Prefers NVIDIA CUDA on Cloud VMs / Linux servers,
+        followed by Apple Silicon Metal Performance Shaders ('mps') on macOS,
+        with robust multi-core CPU optimization fallback.
+        """
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                logger.info(f"NVIDIA CUDA GPU detected: {gpu_name}. Hardware acceleration active.")
+                return "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available() and torch.backends.mps.is_built():
+                logger.info("Apple Silicon GPU detected. Metal Performance Shaders (MPS) active.")
+                return "mps"
+            else:
+                logger.info("GPU acceleration not present. Using high-performance multi-core CPU optimization.")
+                return "cpu"
+        except Exception as e:
+            logger.warning(f"PyTorch device check encountered: {e}. Defaulting to CPU.")
+            return "cpu"
+
+    @staticmethod
+    def get_device_info() -> Dict[str, Any]:
+        """Returns structured hardware information for telemetry and UI badges."""
+        device = HardwareAccelerationManager.get_torch_device()
+        cpu_cores = os.cpu_count() or 4
+        os_name = platform.system()
+        gpu_name = None
+        engine_label = f"Multi-Core CPU ({cpu_cores} Cores)"
+
+        try:
+            import torch
+            if device == "cuda":
+                gpu_name = torch.cuda.get_device_name(0)
+                engine_label = f"NVIDIA CUDA ({gpu_name})"
+            elif device == "mps":
+                engine_label = "Apple Silicon MPS (Metal)"
+            else:
+                engine_label = f"Multi-Core CPU ({cpu_cores} Cores)"
+        except Exception:
+            pass
+
+        return {
+            "device": device,
+            "engine_label": engine_label,
+            "gpu_name": gpu_name,
+            "cpu_cores": cpu_cores,
+            "os": os_name
+        }
+
+    @staticmethod
+    def get_whisper_config() -> Dict[str, Any]:
+        """Configures faster-whisper (CTranslate2) dynamically for CUDA or CPU."""
+        device = HardwareAccelerationManager.get_torch_device()
+        cpu_cores = os.cpu_count() or 4
+        optimal_threads = min(max(cpu_cores - 2, 2), 8)
+
+        if device == "cuda":
+            return {
+                "device": "cuda",
+                "compute_type": "float16",
+                "cpu_threads": optimal_threads,
+            }
+        else:
+            return {
+                "device": "cpu",
+                "compute_type": "int8",
+                "cpu_threads": optimal_threads,
+            }
+
+    @staticmethod
+    def verify_ffmpeg() -> bool:
+        """Verifies if ffmpeg is accessible in system PATH."""
+        ffmpeg_path = shutil.which("ffmpeg")
+        if ffmpeg_path:
+            logger.info(f"FFmpeg found at: {ffmpeg_path}")
+            return True
+        logger.error("FFmpeg not found! Please ensure ffmpeg is installed (e.g. `apt-get install ffmpeg` on Linux VM).")
+        return False
+
+
+# Compatibility alias for existing code
+AppleSiliconManager = HardwareAccelerationManager
+
+
+# ============================================================================
+# YouTube Downloader
+# ============================================================================
+
+class YouTubeDownloader:
+    """Downloads YouTube videos locally using yt-dlp."""
+
+    @staticmethod
+    def download(
+        url: str,
+        output_dir: Path,
+        progress_callback: Optional[Callable[[float, str], None]] = None
+    ) -> Path:
+        """Downloads the best MP4 video stream from a YouTube URL."""
+        try:
+            import yt_dlp
+        except ImportError:
+            raise RuntimeError("`yt-dlp` is required for YouTube downloading. Run `pip install yt-dlp`.")
+
+        logger.info(f"Downloading YouTube video from: {url}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        outtmpl = str(output_dir / "%(id)s.%(ext)s")
+
+        def ydl_hook(d):
+            if d.get("status") == "downloading" and progress_callback:
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
+                downloaded = d.get("downloaded_bytes", 0)
+                pct = min(downloaded / total, 1.0)
+                progress_callback(pct * 0.1, f"Downloading YouTube: {int(pct * 100)}%")
+
+        ydl_opts = {
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "outtmpl": outtmpl,
+            "merge_output_format": "mp4",
+            "progress_hooks": [ydl_hook],
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios", "web", "mweb"]
+                }
+            },
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                video_id = info.get("id", "youtube_video")
+                expected_mp4 = output_dir / f"{video_id}.mp4"
+                if expected_mp4.exists():
+                    logger.info(f"YouTube video downloaded successfully: {expected_mp4}")
+                    return expected_mp4
+
+                candidates = list(output_dir.glob(f"{video_id}*.mp4"))
+                if candidates:
+                    return candidates[0]
+
+                raise FileNotFoundError(f"Downloaded YouTube video not found in {output_dir}")
+        except Exception as e:
+            err_msg = str(e)
+            if "This video is unavailable" in err_msg or "Video unavailable" in err_msg:
+                raise RuntimeError(
+                    f"YouTube video is unavailable ({url}). The video may have been deleted, made private, or the link has a typo. Please check the URL or upload the video file directly."
+                ) from e
+            elif "Sign in to confirm" in err_msg:
+                raise RuntimeError(
+                    f"YouTube requires sign-in or bot verification for this video ({url}). Try uploading the MP4 file directly via the 'Upload File' tab."
+                ) from e
+            raise RuntimeError(f"YouTube download failed: {err_msg}") from e
+
+    @staticmethod
+    def get_video_info(url: str) -> Dict[str, Any]:
+        """Fetches YouTube video metadata (title, duration, thumbnail) without downloading."""
+        try:
+            import yt_dlp
+        except ImportError:
+            raise RuntimeError("`yt-dlp` is required. Run `pip install yt-dlp`.")
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios", "web", "mweb"]
+                }
+            },
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                duration_sec = info.get("duration", 0) or 0
+                
+                # Format seconds into HH:MM:SS or MM:SS
+                hours = int(duration_sec // 3600)
+                mins = int((duration_sec % 3600) // 60)
+                secs = int(duration_sec % 60)
+                if hours > 0:
+                    duration_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+                else:
+                    duration_str = f"{mins:02d}:{secs:02d}"
+
+                return {
+                    "id": info.get("id", ""),
+                    "title": info.get("title", "Untitled Video"),
+                    "duration_seconds": duration_sec,
+                    "duration_formatted": duration_str,
+                    "duration_minutes": round(duration_sec / 60.0, 1),
+                    "thumbnail": info.get("thumbnail") or (info.get("thumbnails")[-1]["url"] if info.get("thumbnails") else ""),
+                    "channel": info.get("uploader") or info.get("channel", "Unknown Channel"),
+                    "view_count": info.get("view_count", 0),
+                }
+        except Exception as e:
+            err_msg = str(e)
+            if "This video is unavailable" in err_msg or "Video unavailable" in err_msg:
+                raise ValueError("YouTube video is unavailable. It may have been deleted, made private, or the URL contains a typo.") from e
+            elif "Sign in to confirm" in err_msg:
+                raise ValueError("YouTube requires sign-in for this video. Please upload the file directly.") from e
+            raise ValueError(f"Unable to access video: {err_msg}") from e
+
+
+# ============================================================================
+# Video Segmenter & Trimmer
+# ============================================================================
+
+class VideoSegmenter:
+    """Trims and splits videos into timed parts using FFmpeg fast stream copy."""
+
+    @staticmethod
+    def trim(
+        input_video: Path,
+        output_video: Path,
+        start_seconds: float = 0.0,
+        duration_seconds: Optional[float] = None
+    ) -> Path:
+        """
+        Extracts a segment from input_video starting at start_seconds.
+        Uses keyframe-accurate fast stream copying (-c copy) in < 1 second.
+        """
+        output_video.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start_seconds),
+            "-i", str(input_video),
+        ]
+        if duration_seconds is not None and duration_seconds > 0:
+            cmd.extend(["-t", str(duration_seconds)])
+        
+        cmd.extend(["-c", "copy", str(output_video)])
+
+        try:
+            logger.info(f"Trimming video segment: start={start_seconds}s, duration={duration_seconds}s -> {output_video.name}")
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return output_video
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg trim failed: {e.stderr.decode('utf-8', errors='ignore')}")
+            # If fast stream copy fails due to container keyframe quirks, fallback to transcode trim
+            logger.warning("Retrying trim with fast re-encode...")
+            cmd_fallback = [
+                "ffmpeg", "-y",
+                "-ss", str(start_seconds),
+                "-i", str(input_video),
+            ]
+            if duration_seconds is not None and duration_seconds > 0:
+                cmd_fallback.extend(["-t", str(duration_seconds)])
+            cmd_fallback.extend(["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "copy", str(output_video)])
+            subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return output_video
+
+
+class ShortsGenerator:
+    """
+    Creates high-engagement Instagram Reels / YouTube Shorts (9:16 vertical video)
+    from top action and climax moments in manhwa and recap videos.
+    """
+
+    MOMENT_CATEGORIES = [
+        "🔥 Peak Action & Climax",
+        "⚡ Epic Confrontation",
+        "🎬 Plot Twist & Dramatic Reveal",
+        "💥 Unstoppable Power Awakening",
+        "🗡️ Decisive Battle Turn",
+        "🛡️ Legendary Stand",
+        "✨ Final Climax Clashing",
+        "🔥 High-Voltage Climax",
+        "⚡ Secret Revealed",
+        "💥 Supreme Counterattack",
+    ]
+
+    @staticmethod
+    def format_timestamp(s: float) -> str:
+        s = max(0.0, float(s))
+        hrs = int(s // 3600)
+        m = int((s % 3600) // 60)
+        sec = int(s % 60)
+        if hrs > 0:
+            return f"{hrs}:{m:02d}:{sec:02d}"
+        return f"{m:02d}:{sec:02d}"
+
+    @staticmethod
+    def detect_top_moments(
+        video_path: Optional[Path] = None,
+        audio_path: Optional[Path] = None,
+        duration_seconds: float = 0.0,
+        num_moments: int = 3,
+        moment_duration: float = 45.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Detects top climax moments in the video.
+        Uses audio RMS energy peak detection if audio/video is on disk,
+        or narrative climax distribution curve if only duration is known.
+        """
+        num_moments = max(1, min(10, int(num_moments)))
+        moment_duration = max(15.0, min(90.0, float(moment_duration)))
+
+        # 1. Try audio energy detection if audio_path exists
+        if audio_path and Path(audio_path).exists():
+            moments = ShortsGenerator._detect_via_audio(Path(audio_path), duration_seconds, num_moments, moment_duration)
+            if moments:
+                return moments
+
+        # 2. Try fast audio extraction & energy detection if video_path exists
+        if video_path and Path(video_path).exists():
+            try:
+                temp_wav = Path(video_path).parent / f"energy_probe_{Path(video_path).stem}.wav"
+                cmd = [
+                    "ffmpeg", "-y", "-i", str(video_path),
+                    "-vn", "-ar", "8000", "-ac", "1", "-c:a", "pcm_s16le",
+                    str(temp_wav)
+                ]
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                moments = ShortsGenerator._detect_via_audio(temp_wav, duration_seconds, num_moments, moment_duration)
+                if temp_wav.exists():
+                    temp_wav.unlink(missing_ok=True)
+                if moments:
+                    return moments
+            except Exception as e:
+                logger.warning(f"Audio energy detection fallback to narrative curve: {e}")
+
+        # 3. Fallback to narrative climax curve
+        return ShortsGenerator._calculate_narrative_moments(duration_seconds, num_moments, moment_duration)
+
+    @staticmethod
+    def _detect_via_audio(
+        wav_path: Path,
+        duration_seconds: float,
+        num_moments: int,
+        moment_duration: float
+    ) -> List[Dict[str, Any]]:
+        try:
+            import numpy as np
+            import soundfile as sf
+            data, sr = sf.read(str(wav_path))
+            if len(data.shape) > 1:
+                data = np.mean(data, axis=1)
+            total_dur = len(data) / sr if sr > 0 else duration_seconds
+            if total_dur < moment_duration:
+                return [{
+                    "index": 1,
+                    "title": "Top Moment #1",
+                    "category": ShortsGenerator.MOMENT_CATEGORIES[0],
+                    "start_seconds": 0.0,
+                    "duration_seconds": round(total_dur, 1),
+                    "end_seconds": round(total_dur, 1),
+                    "time_range": f"00:00 - {ShortsGenerator.format_timestamp(total_dur)}",
+                    "score": 1.0
+                }]
+
+            win_size = int(moment_duration * sr)
+            step_size = int(5.0 * sr)
+            windows = []
+            min_sample = int(total_dur * 0.05 * sr)
+            max_sample = max(min_sample + win_size, int((total_dur * 0.96 - moment_duration) * sr))
+
+            for s_idx in range(min_sample, max_sample, step_size):
+                chunk = data[s_idx:s_idx + win_size]
+                if len(chunk) < win_size:
+                    break
+                rms = float(np.sqrt(np.mean(chunk**2)))
+                windows.append((s_idx / sr, (s_idx + win_size) / sr, rms))
+
+            if not windows:
+                return ShortsGenerator._calculate_narrative_moments(total_dur, num_moments, moment_duration)
+
+            windows.sort(key=lambda x: x[2], reverse=True)
+            chosen = []
+            for start, end, score in windows:
+                if not any(abs(start - c[0]) < (moment_duration * 0.8) for c in chosen):
+                    chosen.append((start, end, score))
+                if len(chosen) >= num_moments:
+                    break
+
+            chosen.sort(key=lambda x: x[0])
+            results = []
+            for idx, (st, en, sc) in enumerate(chosen):
+                cat = ShortsGenerator.MOMENT_CATEGORIES[idx % len(ShortsGenerator.MOMENT_CATEGORIES)]
+                results.append({
+                    "index": idx + 1,
+                    "title": f"Top Moment #{idx + 1}",
+                    "category": cat,
+                    "start_seconds": round(st, 1),
+                    "duration_seconds": round(en - st, 1),
+                    "end_seconds": round(en, 1),
+                    "time_range": f"{ShortsGenerator.format_timestamp(st)} - {ShortsGenerator.format_timestamp(en)}",
+                    "score": round(sc, 3)
+                })
+            return results
+        except Exception as e:
+            logger.warning(f"Error in _detect_via_audio: {e}")
+            return []
+
+    @staticmethod
+    def _calculate_narrative_moments(
+        duration_seconds: float,
+        num_moments: int,
+        moment_duration: float
+    ) -> List[Dict[str, Any]]:
+        dur = max(duration_seconds, moment_duration)
+        if dur <= moment_duration:
+            return [{
+                "index": 1,
+                "title": "Top Moment #1",
+                "category": ShortsGenerator.MOMENT_CATEGORIES[0],
+                "start_seconds": 0.0,
+                "duration_seconds": round(dur, 1),
+                "end_seconds": round(dur, 1),
+                "time_range": f"00:00 - {ShortsGenerator.format_timestamp(dur)}",
+                "score": 1.0
+            }]
+
+        results = []
+        usable = dur - moment_duration
+        step = usable / (num_moments + 1)
+        for i in range(num_moments):
+            start = round(step * (i + 1), 1)
+            end = round(start + moment_duration, 1)
+            cat = ShortsGenerator.MOMENT_CATEGORIES[i % len(ShortsGenerator.MOMENT_CATEGORIES)]
+            results.append({
+                "index": i + 1,
+                "title": f"Top Moment #{i + 1}",
+                "category": cat,
+                "start_seconds": start,
+                "duration_seconds": moment_duration,
+                "end_seconds": end,
+                "time_range": f"{ShortsGenerator.format_timestamp(start)} - {ShortsGenerator.format_timestamp(end)}",
+                "score": round(0.95 - (i * 0.05), 2)
+            })
+        return results
+
+    @staticmethod
+    def create_vertical_short(
+        input_video: Path,
+        output_path: Path,
+        start_seconds: float = 0.0,
+        duration_seconds: float = 45.0,
+        aspect_ratio: str = "9:16",
+    ) -> Path:
+        """
+        Renders a 9:16 vertical Instagram Reel / YouTube Short (1080x1920)
+        with blurred aesthetic ambient wings and centered crisp 16:9 video.
+        """
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if aspect_ratio == "9:16":
+            filter_complex = (
+                "[0:v]split=2[bg][fg];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[blurred];"
+                "[fg]scale=1080:-2:force_original_aspect_ratio=decrease[scaled];"
+                "[blurred][scaled]overlay=(W-w)/2:(H-h)/2"
+            )
+        else:
+            filter_complex = "scale=1920:1080:force_original_aspect_ratio=decrease"
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start_seconds),
+            "-t", str(duration_seconds),
+            "-i", str(input_video),
+            "-filter_complex", filter_complex,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            str(output_path)
+        ]
+        try:
+            logger.info(f"Generating 9:16 vertical short: start={start_seconds}s, dur={duration_seconds}s -> {output_path.name}")
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return output_path
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg vertical short failed: {e.stderr.decode('utf-8', errors='ignore')}")
+            cmd_fallback = [
+                "ffmpeg", "-y",
+                "-ss", str(start_seconds),
+                "-t", str(duration_seconds),
+                "-i", str(input_video),
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-c:a", "aac",
+                str(output_path)
+            ]
+            subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return output_path
+
+
+# ============================================================================
+# Step 1: Audio Extraction & Demixing (Vocal/Music Separation)
+# ============================================================================
+
+class AudioDemixer:
+    """
+    Extracts audio from video and separates it into vocals (English narration)
+    and background accompaniment (BGM + sound effects) using Demucs.
+    """
+
+    def __init__(self, device: Optional[str] = None):
+        self.device = device or AppleSiliconManager.get_torch_device()
+
+    def extract_audio(self, video_path: Path, output_audio_path: Path) -> Path:
+        """Extracts 44.1kHz stereo WAV from the input video via FFmpeg."""
+        logger.info(f"Extracting source audio from {video_path.name}...")
+        output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-vn",
+            "-acodec", "pcm_s16le",
+            "-ar", "44100",
+            "-ac", "2",
+            str(output_audio_path)
+        ]
+        
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logger.info(f"Source audio extracted to: {output_audio_path}")
+            return output_audio_path
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg extraction failed: {e.stderr.decode('utf-8', errors='ignore')}")
+            raise RuntimeError(f"Failed to extract audio from video: {e}")
+
+    def separate_audio(
+        self,
+        audio_path: Path,
+        output_dir: Path,
+        model_name: str = "htdemucs"
+    ) -> Tuple[Path, Path]:
+        """
+        Separates audio into vocals and background (accompaniment) using Demucs.
+        
+        Returns:
+            Tuple[Path, Path]: (vocals_path, background_path)
+        """
+        logger.info(f"Separating audio with Demucs (model='{model_name}', device='{self.device}')...")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Demucs CLI command with two-stems=vocals to optimize separation speed
+        # On Apple Silicon MPS, some demucs ops prefer CPU fallback if MPS has kernel issues
+        device_flag = self.device if self.device in ["mps", "cpu", "cuda"] else "cpu"
+        
+        cmd = [
+            sys.executable, "-m", "demucs.separate",
+            "-n", model_name,
+            "--two-stems", "vocals",
+            "-o", str(output_dir),
+            "-d", device_flag,
+            str(audio_path)
+        ]
+
+        try:
+            logger.info("Executing Demucs demixing process...")
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                # If MPS caused an issue, retry on CPU
+                if device_flag == "mps":
+                    logger.warning("MPS demixing encountered an issue. Retrying with high-performance CPU mode...")
+                    cmd[cmd.index("-d") + 1] = "cpu"
+                    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+                else:
+                    raise RuntimeError(f"Demucs separation failed: {result.stderr}")
+
+            # Demucs organizes files as: output_dir / model_name / audio_stem / vocals.wav & no_vocals.wav
+            stem_name = audio_path.stem
+            demucs_track_dir = output_dir / model_name / stem_name
+            
+            raw_vocals = demucs_track_dir / "vocals.wav"
+            raw_no_vocals = demucs_track_dir / "no_vocals.wav"
+
+            if not raw_vocals.exists() or not raw_no_vocals.exists():
+                # Check for alternative stem names
+                possible_vocals = list(demucs_track_dir.glob("*vocals*.wav"))
+                if not possible_vocals:
+                    raise FileNotFoundError(f"Demucs outputs not found in {demucs_track_dir}")
+                raw_vocals = possible_vocals[0]
+                raw_no_vocals = [f for f in demucs_track_dir.glob("*.wav") if f != raw_vocals][0]
+
+            # Standardize destination paths
+            final_vocals = output_dir / "vocals.wav"
+            final_background = output_dir / "background.wav"
+
+            shutil.copyfile(raw_vocals, final_vocals)
+            shutil.copyfile(raw_no_vocals, final_background)
+
+            logger.info(f"Audio demixing successful:\n - Vocals: {final_vocals}\n - Background: {final_background}")
+            return final_vocals, final_background
+
+        except Exception as e:
+            logger.error(f"Error during audio separation: {e}")
+            raise
+
+
+# ============================================================================
+# Step 2: Timed Transcription (English)
+# ============================================================================
+
+class TimedTranscriber:
+    """
+    Transcribes English vocals into timed segments using faster-whisper.
+    Returns: List[Dict] with 'start', 'end', and 'text'.
+    """
+
+    def __init__(self, model_size: str = "base"):
+        self.model_size = model_size
+        self.config = AppleSiliconManager.get_whisper_config()
+        self.model = None
+
+    def load_model(self):
+        """Lazy load faster-whisper model."""
+        if self.model is None:
+            try:
+                from faster_whisper import WhisperModel
+                logger.info(f"Loading faster-whisper model '{self.model_size}' (device={self.config['device']}, compute_type={self.config['compute_type']})...")
+                self.model = WhisperModel(
+                    self.model_size,
+                    device=self.config["device"],
+                    compute_type=self.config["compute_type"],
+                    cpu_threads=self.config["cpu_threads"]
+                )
+            except ImportError:
+                logger.error("`faster-whisper` is not installed. Please install via `pip install faster-whisper`.")
+                raise
+
+    def transcribe(self, vocals_path: Path) -> List[Dict[str, Any]]:
+        """
+        Transcribes the isolated vocals file.
+        
+        Returns:
+            List[Dict[str, Any]]: List of segment dicts with 'start', 'end', and 'text'.
+        """
+        self.load_model()
+        logger.info(f"Transcribing vocals from: {vocals_path}...")
+        
+        try:
+            segments_generator, info = self.model.transcribe(
+                str(vocals_path),
+                beam_size=5,
+                language="en",
+                vad_filter=True,  # Voice activity detection trims silence
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
+
+            logger.info(f"Detected language: {info.language} (probability: {info.language_probability:.2f})")
+
+            results = []
+            for seg in segments_generator:
+                text = seg.text.strip()
+                if not text:
+                    continue
+                segment_dict = {
+                    "start": round(float(seg.start), 3),
+                    "end": round(float(seg.end), 3),
+                    "text": text,
+                }
+                results.append(segment_dict)
+                logger.debug(f"[{segment_dict['start']}s -> {segment_dict['end']}s]: {segment_dict['text']}")
+
+            logger.info(f"Transcription complete: extracted {len(results)} timed speech segments.")
+            return results
+
+        except Exception as e:
+            logger.error(f"Transcription failed: {e}")
+            raise
+
+
+# ============================================================================
+# Step 3: Text Translation (English to Spanish)
+# ============================================================================
+
+class SegmentTranslator:
+    """
+    Translates transcript segments from source to target language while preserving
+    exact start and end timing.
+    Supports:
+    - 'deep-translator' (Fast, lightweight Google Translate engine - 100+ languages including Tamil, Telugu, Bengali)
+    - 'helsinki-nlp' (Offline HuggingFace MarianMT model)
+    """
+
+    MYMEMORY_LANG_MAP = {
+        "es": "es-ES", "de": "de-DE", "fr": "fr-FR", "id": "id-ID",
+        "ta": "ta-IN", "te": "te-IN", "bn": "bn-IN", "hi": "hi-IN",
+        "kn": "kn-IN", "ml": "ml-IN", "mr": "mr-IN", "pt": "pt-BR",
+        "vi": "vi-VN", "ar": "ar-SA", "ru": "ru-RU", "ja": "ja-JP"
+    }
+
+    def __init__(self, engine: str = "deep-translator", target_lang: str = "es", device: Optional[str] = None):
+        self.engine = engine.lower()
+        self.target_lang = target_lang.lower()
+        self.device = device or AppleSiliconManager.get_torch_device()
+        self._hf_model = None
+        self._hf_tokenizer = None
+
+    def _init_hf_model(self):
+        if self._hf_model is None or self._hf_tokenizer is None:
+            from transformers import MarianMTModel, MarianTokenizer
+            model_name = f"Helsinki-NLP/opus-mt-en-{self.target_lang}"
+            logger.info(f"Loading local HuggingFace translation model: {model_name}...")
+            self._hf_tokenizer = MarianTokenizer.from_pretrained(model_name)
+            self._hf_model = MarianMTModel.from_pretrained(model_name)
+
+    def _translate_hf(self, text: str) -> str:
+        self._init_hf_model()
+        inputs = self._hf_tokenizer(text, return_tensors="pt")
+        outputs = self._hf_model.generate(**inputs)
+        return self._hf_tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    def _translate_single(self, en_text: str, translator) -> str:
+        """Translates a single string with multi-tier fallback."""
+        if not en_text:
+            return ""
+
+        # 1. If explicit helsinki-nlp requested
+        if self.engine == "helsinki-nlp":
+            try:
+                return self._translate_hf(en_text)
+            except Exception as e:
+                logger.warning(f"MarianMT translation failed for '{en_text[:30]}...': {e}")
+
+        # 2. Try GoogleTranslator
+        if translator:
+            try:
+                res = translator.translate(en_text)
+                if res and res.strip() and res.strip().lower() != en_text.strip().lower():
+                    return res.strip()
+            except Exception as e:
+                logger.debug(f"GoogleTranslator error: {e}. Trying fallback...")
+
+        # 3. Fallback to local HuggingFace MarianMT (fast, offline)
+        try:
+            res = self._translate_hf(en_text)
+            if res and res.strip() and res.strip().lower() != en_text.strip().lower():
+                return res.strip()
+        except Exception:
+            pass
+
+        # 4. Fallback to MyMemoryTranslator
+        try:
+            from deep_translator import MyMemoryTranslator
+            tag = self.MYMEMORY_LANG_MAP.get(self.target_lang, self.target_lang)
+            res = MyMemoryTranslator(source="en-US", target=tag).translate(en_text)
+            if res and res.strip() and res.strip().lower() != en_text.strip().lower():
+                return res.strip()
+        except Exception:
+            pass
+
+        # Return original text if all translation methods fail
+        return en_text
+
+    def translate_segments(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Translates a list of segment dictionaries.
+        Each returned segment contains: 'start', 'end', 'original_text', and 'text' (translated).
+        """
+        logger.info(f"Translating {len(segments)} segments to '{self.target_lang}' using engine: '{self.engine}'...")
+        translated_segments = []
+
+        translator = None
+        if self.engine == "deep-translator":
+            try:
+                from deep_translator import GoogleTranslator
+                translator = GoogleTranslator(source="en", target=self.target_lang)
+            except ImportError:
+                logger.warning("deep-translator not found. Falling back to local MarianMT model.")
+                self.engine = "helsinki-nlp"
+
+        translated_count = 0
+        for idx, seg in enumerate(segments, 1):
+            en_text = seg["text"].strip()
+            translated_text = self._translate_single(en_text, translator)
+
+            if translated_text and translated_text.lower() != en_text.lower():
+                translated_count += 1
+            else:
+                logger.warning(f"Segment {idx} could not be translated. Kept original: '{en_text}'")
+
+            new_seg = {
+                "start": seg["start"],
+                "end": seg["end"],
+                "original_text": en_text,
+                "text": translated_text,
+            }
+            translated_segments.append(new_seg)
+
+        success_rate = (translated_count / len(segments) * 100) if segments else 0
+        logger.info(f"Translation complete: {translated_count}/{len(segments)} ({success_rate:.1f}%) segments translated to '{self.target_lang}'.")
+        return translated_segments
+
+
+# ============================================================================
+# Step 4: Timestamp-Aware Text-to-Speech (Spanish) & Timeline Alignment
+# ============================================================================
+
+DEFAULT_LANGUAGE_VOICES: Dict[str, str] = {
+    "es": "es-ES-AlvaroNeural",
+    "de": "de-DE-ConradNeural",
+    "fr": "fr-FR-HenriNeural",
+    "id": "id-ID-ArdiNeural",
+    "ta": "ta-IN-ValluvarNeural",
+    "te": "te-IN-MohanNeural",
+    "bn": "bn-IN-BashkarNeural",
+    "hi": "hi-IN-MadhurNeural",
+    "kn": "kn-IN-GaganNeural",
+    "ml": "ml-IN-MidhunNeural",
+    "mr": "mr-IN-ManoharNeural",
+    "pt": "pt-BR-AntonioNeural",
+    "vi": "vi-VN-NamMinhNeural",
+    "ar": "ar-SA-HamedNeural",
+    "ru": "ru-RU-DmitryNeural",
+    "ja": "ja-JP-KeitaNeural",
+}
+
+LANGUAGE_NAMES: Dict[str, str] = {
+    "es": "Spanish",
+    "de": "German",
+    "fr": "French",
+    "id": "Indonesian",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "bn": "Bengali",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "pt": "Portuguese",
+    "vi": "Vietnamese",
+    "ar": "Arabic",
+    "ru": "Russian",
+    "ja": "Japanese",
+}
+
+DEFAULT_LANGUAGE_FEMALE_VOICES: Dict[str, str] = {
+    "es": "es-ES-ElviraNeural",
+    "de": "de-DE-KatjaNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "id": "id-ID-GadisNeural",
+    "ta": "ta-IN-PallaviNeural",
+    "te": "te-IN-ShrutiNeural",
+    "bn": "bn-IN-TanishaaNeural",
+    "hi": "hi-IN-SwaraNeural",
+    "kn": "kn-IN-SapnaNeural",
+    "ml": "ml-IN-SobhanaNeural",
+    "mr": "mr-IN-AarohiNeural",
+    "pt": "pt-BR-FranciscaNeural",
+    "vi": "vi-VN-HoaiMyNeural",
+    "ar": "ar-EG-SalmaNeural",
+    "ru": "ru-RU-SvetlanaNeural",
+    "ja": "ja-JP-NanamiNeural",
+}
+
+def resolve_voice(target_lang: str, gender: Optional[str] = None) -> str:
+    lang = target_lang.lower()
+    if gender and gender.lower() == "female":
+        return DEFAULT_LANGUAGE_FEMALE_VOICES.get(lang, DEFAULT_LANGUAGE_VOICES.get(lang, "es-ES-ElviraNeural"))
+    return DEFAULT_LANGUAGE_VOICES.get(lang, "es-ES-AlvaroNeural")
+
+
+class TimestampAwareTTS:
+    """
+    Generates voiceover chunks for each translated segment and aligns
+    them along a master audio timeline matching original video pacing.
+    
+    Engines:
+    - 'edge-tts': High-performance neural narration (e.g., 'de-DE-ConradNeural', 'fr-FR-HenriNeural', 'id-ID-ArdiNeural')
+    - 'xtts': Coqui XTTS-v2 for zero-shot voice cloning using 'vocals.wav'
+    """
+
+    def __init__(
+        self,
+        engine: str = "edge-tts",
+        target_lang: str = "es",
+        voice_clone: bool = False,
+        voice_name: Optional[str] = None,
+        voice_gender: Optional[str] = None,
+        device: Optional[str] = None,
+        speed_cap: float = 1.15
+    ):
+        self.engine = engine.lower()
+        self.target_lang = target_lang.lower()
+        self.voice_clone = voice_clone
+        self.voice_gender = voice_gender
+        self.voice_name = voice_name or resolve_voice(self.target_lang, voice_gender)
+        self.device = device or AppleSiliconManager.get_torch_device()
+        self.speed_cap = max(1.0, min(float(speed_cap), 1.5))
+        self._xtts_model = None
+
+    def _init_xtts(self):
+        if self._xtts_model is None:
+            try:
+                from TTS.api import TTS
+                logger.info(f"Loading Coqui XTTS-v2 for voice cloning on {self.device}...")
+                self._xtts_model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2", gpu=(self.device in ["mps", "cuda"]))
+            except Exception as e:
+                logger.warning(f"Failed to load Coqui XTTS ({e}). Falling back to neural edge-tts.")
+                self.voice_clone = False
+                self.engine = "edge-tts"
+
+    def _generate_chunk_edge_tts(self, text: str, output_path: Path):
+        """Asynchronously synthesizes speech via edge-tts."""
+        import edge_tts
+        communicate = edge_tts.Communicate(text=text, voice=self.voice_name)
+        asyncio.run(communicate.save(str(output_path)))
+
+    def _generate_chunk_xtts(self, text: str, ref_wav: Path, output_path: Path):
+        """Generates cloned voice using Coqui XTTS-v2."""
+        xtts_lang = self.target_lang if self.target_lang in [
+            "en", "es", "fr", "de", "it", "pt", "pl", "tr", "ru", "nl", "cs", "ar", "zh-cn", "ja", "hu", "ko", "hi"
+        ] else "en"
+        self._xtts_model.tts_to_file(
+            text=text,
+            speaker_wav=str(ref_wav),
+            language=xtts_lang,
+            file_path=str(output_path)
+        )
+
+    @staticmethod
+    def get_audio_duration(file_path: Path) -> float:
+        """Retrieves exact duration in seconds of an audio file using ffprobe."""
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(file_path)
+        ]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
+            return float(res.stdout.strip())
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def time_stretch_audio(input_wav: Path, output_wav: Path, speed_factor: float, max_speed: float = 1.15):
+        """
+        Adjusts playback speed of an audio chunk using FFmpeg 'atempo' filter
+        without changing pitch, capped at max_speed to prevent rushed or unnatural speech.
+        """
+        speed_factor = max(0.65, min(speed_factor, max_speed))
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_wav),
+            "-filter:a", f"atempo={speed_factor:.3f}",
+            "-vn",
+            str(output_wav)
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+    def generate_and_align(
+        self,
+        segments: List[Dict[str, Any]],
+        reference_vocals_path: Optional[Path],
+        output_spanish_vocals: Path,
+        total_duration: float,
+        temp_dir: Path,
+        auto_speed_adjust: bool = True,
+        speed_cap: Optional[float] = None
+    ) -> Path:
+        """
+        Synthesizes Spanish audio for each segment, places each chunk at its exact
+        start timestamp on a silent timeline buffer, and saves 'spanish_vocals.wav'.
+        """
+        cap = float(speed_cap) if speed_cap is not None else self.speed_cap
+        logger.info(f"Generating TTS chunks for {len(segments)} segments (speed_cap={cap:.2f}x)...")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        chunks_dir = temp_dir / "tts_chunks"
+        chunks_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.voice_clone and reference_vocals_path and reference_vocals_path.exists():
+            self._init_xtts()
+
+        processed_chunks: List[Tuple[float, Path]] = []  # (start_time, wav_path)
+
+        for i, seg in enumerate(segments):
+            start = seg["start"]
+            end = seg["end"]
+            target_duration = max(end - start, 0.2)
+            es_text = seg["text"].strip()
+
+            if not es_text:
+                continue
+
+            raw_chunk_path = chunks_dir / f"chunk_{i:04d}_raw.wav"
+            aligned_chunk_path = chunks_dir / f"chunk_{i:04d}_aligned.wav"
+
+            try:
+                if self.voice_clone and self._xtts_model is not None and reference_vocals_path:
+                    self._generate_chunk_xtts(es_text, reference_vocals_path, raw_chunk_path)
+                else:
+                    self._generate_chunk_edge_tts(es_text, raw_chunk_path)
+
+                # Measure generated audio duration
+                chunk_duration = self.get_audio_duration(raw_chunk_path)
+
+                # Time stretch if translated sentence is longer than original English duration
+                if auto_speed_adjust and chunk_duration > target_duration and target_duration > 0.5:
+                    speed_factor = chunk_duration / target_duration
+                    if speed_factor > 1.05:
+                        clamped_speed = min(speed_factor, cap)
+                        logger.debug(f"Segment {i}: adjusting speech speed by {clamped_speed:.2f}x (target={speed_factor:.2f}x, cap={cap:.2f}x)")
+                        self.time_stretch_audio(raw_chunk_path, aligned_chunk_path, clamped_speed, max_speed=cap)
+                    else:
+                        shutil.copyfile(raw_chunk_path, aligned_chunk_path)
+                else:
+                    shutil.copyfile(raw_chunk_path, aligned_chunk_path)
+
+                processed_chunks.append((start, aligned_chunk_path))
+
+            except Exception as e:
+                logger.error(f"Error synthesizing segment {i} ('{es_text}'): {e}")
+                continue
+
+        # Build timeline using FFmpeg amix / adelay or high-precision Python WAV stitching
+        logger.info("Assembling chunks onto high-precision master timeline...")
+        self._stitch_timeline(processed_chunks, total_duration, output_spanish_vocals)
+        
+        logger.info(f"Vocals generated and aligned: {output_spanish_vocals}")
+        return output_spanish_vocals
+
+    def _stitch_timeline(
+        self,
+        chunks: List[Tuple[float, Path]],
+        total_duration: float,
+        output_file: Path
+    ):
+        """
+        Places each WAV chunk onto a master timeline array initialized with silence.
+        Handles sample-level accuracy (44.1kHz, 16-bit, stereo) and ensures sequential chunks
+        do not overlap or talk over each other if a previous chunk runs slightly long.
+        """
+        import numpy as np
+        import soundfile as sf
+
+        sample_rate = 44100
+        total_samples = int((total_duration + 5.0) * sample_rate)
+        # 2-channel stereo timeline
+        master_timeline = np.zeros((total_samples, 2), dtype=np.float32)
+
+        last_end_sample = 0
+        min_gap_samples = int(0.06 * sample_rate)  # 60ms natural separation gap between phrases
+
+        for start_sec, chunk_path in chunks:
+            if not chunk_path.exists():
+                continue
+            data, sr = sf.read(str(chunk_path))
+            
+            # Resample if sample rate differs
+            if sr != sample_rate:
+                import scipy.signal
+                num_samples = int(len(data) * float(sample_rate) / sr)
+                data = scipy.signal.resample(data, num_samples)
+
+            # Convert mono to stereo if necessary
+            if data.ndim == 1:
+                data = np.column_stack((data, data))
+
+            target_start_sample = int(start_sec * sample_rate)
+            # Ensure chunk doesn't overlap previous chunk if previous chunk ran slightly over
+            start_sample = max(target_start_sample, last_end_sample + min_gap_samples)
+            end_sample = start_sample + len(data)
+            last_end_sample = end_sample
+
+            if end_sample > total_samples:
+                # Expand master timeline if needed
+                pad_size = end_sample - total_samples
+                master_timeline = np.pad(master_timeline, ((0, pad_size), (0, 0)), mode="constant")
+                total_samples = end_sample
+
+            # Overlay chunk onto master timeline
+            master_timeline[start_sample:end_sample] += data
+
+        # Normalize audio to prevent clipping (-1.0 to 1.0)
+        max_val = np.max(np.abs(master_timeline))
+        if max_val > 1.0:
+            master_timeline /= max_val
+
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(str(output_file), master_timeline, sample_rate, subtype="PCM_16")
+
+
+# ============================================================================
+# Step 5: Audio Re-muxing and Video Export via FFmpeg
+# ============================================================================
+
+class VideoRemuxer:
+    """
+    Mixes Spanish vocals with isolated background audio (BGM/SFX) and
+    stitches the mixed audio back into the original video stream without re-encoding.
+    """
+
+    @staticmethod
+    def generate_watermark_image(
+        text: str,
+        output_path: Path,
+        font_size: int = 28,
+        opacity: float = 0.40,
+    ) -> Path:
+        """
+        Generates a semi-transparent light white PNG watermark with subtle drop shadow.
+        """
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            logger.warning("Pillow not installed; skipping watermark generation.")
+            return output_path
+
+        font_candidates = [
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/SFNS.ttf",
+        ]
+        font = None
+        for candidate in font_candidates:
+            if os.path.exists(candidate):
+                try:
+                    font = ImageFont.truetype(candidate, font_size)
+                    break
+                except Exception:
+                    pass
+        if font is None:
+            font = ImageFont.load_default()
+
+        try:
+            bbox = font.getbbox(text)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+        except Exception:
+            text_w, text_h = len(text) * int(font_size * 0.6), font_size
+
+        pad_x, pad_y = 16, 10
+        img_w = text_w + pad_x * 2
+        img_h = text_h + pad_y * 2
+
+        img = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        alpha = int(255 * max(0.1, min(1.0, opacity)))
+        shadow_alpha = int(alpha * 0.6)
+
+        # Soft drop shadow for legibility over white manga bubbles
+        draw.text((pad_x + 1, pad_y + 1), text, font=font, fill=(0, 0, 0, shadow_alpha))
+        # Light white watermark text
+        draw.text((pad_x, pad_y), text, font=font, fill=(255, 255, 255, alpha))
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(str(output_path), "PNG")
+        return output_path
+
+    @staticmethod
+    def remux_and_export(
+        original_video: Path,
+        spanish_vocals: Path,
+        background_audio: Path,
+        output_video: Path,
+        bg_volume: float = 0.8,
+        vocals_volume: float = 1.0,
+        watermark_text: Optional[str] = None,
+        watermark_interval: float = 3.0,
+        watermark_opacity: float = 0.40,
+        watermark_font_size: int = 28,
+    ) -> Path:
+        """
+        Mixes audio tracks and exports final MP4.
+        If watermark_text is provided, applies a floating light-white watermark jumping every 2-4 seconds.
+        Otherwise, uses `-c:v copy` for instant, zero-quality-loss export.
+        """
+        logger.info(f"Mixing Spanish vocals with background audio (BGM volume={bg_volume}, Vocals volume={vocals_volume})...")
+        output_video.parent.mkdir(parents=True, exist_ok=True)
+
+        temp_mixed_audio = output_video.parent / "temp_mixed_audio.wav"
+        temp_watermark_png: Optional[Path] = None
+
+        # 1. Mix Spanish vocals and background audio with custom volume balances
+        mix_cmd = [
+            "ffmpeg", "-y",
+            "-i", str(spanish_vocals),
+            "-i", str(background_audio),
+            "-filter_complex",
+            f"[0:a]volume={vocals_volume:.2f}[v];[1:a]volume={bg_volume:.2f}[b];[v][b]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+            "-map", "[aout]",
+            "-c:a", "pcm_s16le",
+            str(temp_mixed_audio)
+        ]
+
+        try:
+            subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            logger.info("Audio mixing completed.")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg audio mixing failed: {e.stderr.decode('utf-8', errors='ignore')}")
+            raise RuntimeError(f"Audio mixing failed: {e}")
+
+        # 2. Check if watermark is requested
+        if watermark_text and watermark_text.strip():
+            temp_watermark_png = output_video.parent / "temp_watermark.png"
+            VideoRemuxer.generate_watermark_image(
+                text=watermark_text.strip(),
+                output_path=temp_watermark_png,
+                font_size=watermark_font_size,
+                opacity=watermark_opacity
+            )
+
+            interval = max(1.0, float(watermark_interval))
+            k_expr = f"floor(t/{interval})"
+            x_expr = f"'30+(W-w-60)*mod(abs(sin(({k_expr}+1)*12.9898)*43758.5453),1)'"
+            y_expr = f"'30+(H-h-60)*mod(abs(sin(({k_expr}+1)*78.233)*43758.5453),1)'"
+
+            vcodec = "h264_videotoolbox" if AppleSiliconManager.get_torch_device() == "mps" else "libx264"
+            logger.info(f"Applying animated light-white watermark ('{watermark_text}') jumping every {interval}s with {vcodec}...")
+
+            remux_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(original_video),
+                "-i", str(temp_mixed_audio),
+                "-loop", "1", "-i", str(temp_watermark_png),
+                "-filter_complex",
+                f"[0:v][2:v]overlay=x={x_expr}:y={y_expr}:shortest=1[vout]",
+                "-map", "[vout]",
+                "-map", "1:a:0",
+                "-c:v", vcodec,
+                "-b:v", "4000k",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-shortest",
+                str(output_video)
+            ]
+        else:
+            logger.info(f"Stitching mixed audio into {original_video.name} using '-c:v copy'...")
+            remux_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(original_video),
+                "-i", str(temp_mixed_audio),
+                "-map", "0:v:0",          # Copy original video stream
+                "-map", "1:a:0",          # Inject new mixed audio
+                "-c:v", "copy",           # Zero quality loss, near-instant copy
+                "-c:a", "aac",            # Standard high-compatibility audio codec
+                "-b:a", "192k",
+                "-shortest",              # Match duration
+                str(output_video)
+            ]
+
+        try:
+            subprocess.run(remux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            logger.info(f"Video export complete! Dubbed video saved at: {output_video}")
+            return output_video
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg remuxing failed: {e.stderr.decode('utf-8', errors='ignore')}")
+            raise RuntimeError(f"Video remuxing failed: {e}")
+        finally:
+            # Clean up temp files
+            if temp_mixed_audio.exists():
+                try:
+                    temp_mixed_audio.unlink()
+                except Exception:
+                    pass
+            if temp_watermark_png and temp_watermark_png.exists():
+                try:
+                    temp_watermark_png.unlink()
+                except Exception:
+                    pass
+
+
+# ============================================================================
+# ============================================================================
+# Multilingual YouTube SEO Metadata & Thumbnail Generator
+# ============================================================================
+
+LANGUAGE_SEO_CONFIG: Dict[str, Dict[str, str]] = {
+    "de": {
+        "name": "German",
+        "native": "Deutsch",
+        "badge": "AUF DEUTSCH",
+        "suffix": "| Manhwa Recap Deutsch",
+        "hook": "ICH BIN JETZT DER BOSS!",
+        "hashtags": "#ManhwaRecapDeutsch #ManhwaDeutsch #ManhwaZusammenfassung #MangaDeutsch #Wiedergeburt",
+        "cta": "🔔 Abonniere den Kanal für tägliche Manhwa-Recaps auf Deutsch! 👍 Lass ein Like da!",
+        "tags": "manhwa recap deutsch, manhwa zusammenfassung deutsch, manhwa auf deutsch, manhwa recap, manhwa deutsch erklärt, wiedergeburt manhwa, isekai manhwa deutsch, manga recap deutsch, anime recap deutsch",
+    },
+    "es": {
+        "name": "Spanish",
+        "native": "Español",
+        "badge": "EN ESPAÑOL",
+        "suffix": "| Manhwa Recap Español",
+        "hook": "¡AHORA SOY EL JEFE!",
+        "hashtags": "#ManhwaRecapEspañol #ResumenManhwa #ManhwaEspañol #MangaEspañol #Reencarnacion",
+        "cta": "🔔 ¡Suscríbete al canal para ver resúmenes diarios de manhwa en español! 👍 ¡Deja tu like!",
+        "tags": "manhwa recap español, resumen manhwa español, manhwa en español, resumen de manhwa, manhwa español latino, reencarnacion manhwa, manga recap español, anime resumen español",
+    },
+    "fr": {
+        "name": "French",
+        "native": "Français",
+        "badge": "EN FRANÇAIS",
+        "suffix": "| Manhwa Recap Français",
+        "hook": "JE SUIS LE BOSS MAINTENANT!",
+        "hashtags": "#ManhwaRecapFR #ManhwaFrancais #ResumeManhwa #MangaFR #Reincarnation",
+        "cta": "🔔 Abonne-toi pour des résumés quotidiens de manhwa en français ! 👍 Laisse un like !",
+        "tags": "manhwa recap francais, resume manhwa francais, manhwa en francais, manga recap fr, anime resume fr, webtoon fr, reincarnation manhwa francais",
+    },
+    "id": {
+        "name": "Indonesian",
+        "native": "Bahasa Indonesia",
+        "badge": "BAHASA INDONESIA",
+        "suffix": "| Alur Cerita Manhwa",
+        "hook": "SEKARANG AKU BOSNYA!",
+        "hashtags": "#AlurCeritaManhwa #ManhwaIndonesia #ReviewManhwa #KomikManhwa #Reinkarnasi",
+        "cta": "🔔 Subscribe untuk alur cerita manhwa terbaru setiap hari! 👍 Jangan lupa like!",
+        "tags": "alur cerita manhwa, manhwa sub indo, alur cerita komik, review manhwa indonesia, reinkarnasi manhwa, manhwa over power, pembahasan manhwa, alur cerita manga",
+    },
+    "pt": {
+        "name": "Portuguese",
+        "native": "Português",
+        "badge": "EM PORTUGUÊS",
+        "suffix": "| Manhwa Recap Português",
+        "hook": "AGORA EU SOU O CHEFE!",
+        "hashtags": "#ManhwaRecapPT #ResumoManhwa #ManhwaBrasil #MangaRecapPT #Reencarnacao",
+        "cta": "🔔 Inscreva-se no canal para resumos diários de manhwa em português! 👍 Deixe seu like!",
+        "tags": "manhwa recap portugues, resumo manhwa brasil, manhwa em portugues, recap manhwa pt br, resumo de manhwa, reencarnacao manhwa, manga recap brasil",
+    },
+    "hi": {
+        "name": "Hindi",
+        "native": "हिन्दी",
+        "badge": "HINDI RECAP",
+        "suffix": "| Manhwa Recap Hindi",
+        "hook": "AB MAIN BOSS HOON!",
+        "hashtags": "#ManhwaRecapHindi #ManhwaHindi #AnimeRecapHindi #MangaHindi #Reincarnation",
+        "cta": "🔔 रोज़ाना हिंदी में manhwa recap देखने के लिए चैनल को सब्सक्राइब करें! 👍 Like ज़रूर करें!",
+        "tags": "manhwa recap in hindi, manhwa explained in hindi, anime recap hindi, manga recap in hindi, reincarnation manhwa hindi, manhwa in hindi",
+    },
+    "ta": {
+        "name": "Tamil",
+        "native": "தமிழ்",
+        "badge": "TAMIL RECAP",
+        "suffix": "| Manhwa Recap Tamil",
+        "hook": "INI NAAN THAAN BOSS!",
+        "hashtags": "#ManhwaRecapTamil #ManhwaTamil #AnimeRecapTamil #MangaTamil",
+        "cta": "🔔 தினமும் தமிழ் manhwa recap-க்கு Subscribe பண்ணுங்க! 👍 Like பண்ண மறக்காதீங்க!",
+        "tags": "manhwa recap tamil, manhwa explained in tamil, anime recap tamil, manga recap tamil, webtoon tamil",
+    },
+    "te": {
+        "name": "Telugu",
+        "native": "తెలుగు",
+        "badge": "TELUGU RECAP",
+        "suffix": "| Manhwa Recap Telugu",
+        "hook": "IKA NENE BOSS!",
+        "hashtags": "#ManhwaRecapTelugu #ManhwaTelugu #AnimeRecapTelugu #MangaTelugu",
+        "cta": "🔔 రోజూ తెలుగులో manhwa recap కోసం Subscribe చేయండి! 👍 Like చేయండి!",
+        "tags": "manhwa recap in telugu, manhwa explained in telugu, anime recap telugu, manga recap telugu",
+    },
+    "bn": {
+        "name": "Bengali",
+        "native": "বাংলা",
+        "badge": "BENGALI RECAP",
+        "suffix": "| Manhwa Recap Bangla",
+        "hook": "EKHON AMI-I BOSS!",
+        "hashtags": "#ManhwaRecapBangla #ManhwaBengali #AnimeRecapBangla #MangaBangla",
+        "cta": "🔔 প্রতিদিন বাংলায় manhwa recap দেখতে চ্যানেলটি সাবস্ক্রাইব করুন! 👍 Like দিতে ভুলবেন না!",
+        "tags": "manhwa recap bangla, manhwa explained in bengali, anime recap bangla, manga recap bangla",
+    },
+    "ru": {
+        "name": "Russian",
+        "native": "Русский",
+        "badge": "НА РУССКОМ",
+        "suffix": "| Манхва Краткий Пересказ",
+        "hook": "ТЕПЕРЬ Я ЗДЕСЬ БОСС!",
+        "hashtags": "#МанхваПересказ #МанхваНаРусском #КраткийПересказ #Перерождение #Манга",
+        "cta": "🔔 Подписывайся на канал для ежедневных пересказов манхв на русском! 👍 Ставь лайк!",
+        "tags": "краткий пересказ манхвы, манхва пересказ, манхва на русском, манхва рекап, перерождение манхва, манга пересказ",
+    },
+    "vi": {
+        "name": "Vietnamese",
+        "native": "Tiếng Việt",
+        "badge": "TIẾNG VIỆT",
+        "suffix": "| Review Truyện Tranh",
+        "hook": "GIỜ TAO LÀ TRÙM!",
+        "hashtags": "#ReviewTruyenTranh #TómTắtManhwa #ManhwaTiengViet #TrọngSinh",
+        "cta": "🔔 Đăng ký kênh để xem review truyện tranh manhwa mỗi ngày! 👍 Nhớ bấm Like nhé!",
+        "tags": "review truyen tranh, tom tat manhwa, truyen tranh manhwa, review manhwa tieng viet, trong sinh manhwa",
+    },
+    "ar": {
+        "name": "Arabic",
+        "native": "العربية",
+        "badge": "بالعربية",
+        "suffix": "| ملخص مانهوا بالعربية",
+        "hook": "أنا الزعيم الآن!",
+        "hashtags": "#ملخص_مانهوا #مانهوا_مترجمة #مانهوا_بالعربي #انمي_ملخص",
+        "cta": "🔔 اشترك في القناة لمشاهدة ملخصات مانهوا يومياً بالعربية! 👍 لا تنسى اللايك!",
+        "tags": "ملخص مانهوا, ملخصات مانهوا بالعربية, مانهوا مترجمة, حكاية مانهوا, تلخيص مانهوا",
+    },
+    "ja": {
+        "name": "Japanese",
+        "native": "日本語",
+        "badge": "日本語",
+        "suffix": "| マンガ解説・要約",
+        "hook": "俺が新しいボスだ！",
+        "hashtags": "#マンガ解説 #マンガ要約 #マンガ紹介 #転生マンガ #Webtoon",
+        "cta": "🔔 毎日のマンガ要約・解説動画をお見逃しなく！チャンネル登録＆高評価をお願いします！",
+        "tags": "マンガ解説, マンガ要約, マンガ紹介, 転生マンガ, webtoon 日本語, アニメ要約",
+    },
+    "kn": {
+        "name": "Kannada",
+        "native": "ಕನ್ನಡ",
+        "badge": "KANNADA RECAP",
+        "suffix": "| Manhwa Recap Kannada",
+        "hook": "EEGA NANE BOSS!",
+        "hashtags": "#ManhwaRecapKannada #ManhwaKannada #AnimeRecapKannada",
+        "cta": "🔔 ಪ್ರತಿದಿನ ಕನ್ನಡ manhwa recap ಗಾಗಿ Subscribe ಮಾಡಿ! 👍 Like ಮಾಡಿ!",
+        "tags": "manhwa recap in kannada, manhwa explained in kannada, anime recap kannada",
+    },
+    "ml": {
+        "name": "Malayalam",
+        "native": "മലയാളം",
+        "badge": "MALAYALAM RECAP",
+        "suffix": "| Manhwa Recap Malayalam",
+        "hook": "INI NJAN BOSS!",
+        "hashtags": "#ManhwaRecapMalayalam #ManhwaMalayalam #AnimeRecapMalayalam",
+        "cta": "🔔 ദിവസവും മലയാളത്തിൽ manhwa recap കാണാൻ Subscribe ചെയ്യുക! 👍 Like ചെയ്യുക!",
+        "tags": "manhwa recap in malayalam, manhwa explained in malayalam, anime recap malayalam",
+    },
+    "mr": {
+        "name": "Marathi",
+        "native": "मराठी",
+        "badge": "MARATHI RECAP",
+        "suffix": "| Manhwa Recap Marathi",
+        "hook": "AATA MECH BOSS!",
+        "hashtags": "#ManhwaRecapMarathi #ManhwaMarathi #AnimeRecapMarathi",
+        "cta": "🔔 दररोज मराठीत manhwa recap पाहण्यासाठी Subscribe करा! 👍 Like करा!",
+        "tags": "manhwa recap in marathi, manhwa explained in marathi, anime recap marathi",
+    },
+}
+
+
+class MultilingualMetadataGenerator:
+    """
+    Generates high-CTR YouTube metadata (Title, Description, Tags, Hook)
+    dynamically tailored for any target language.
+    Supports Google Gemini API (free tier) with automated fallback to local translation & localized templates.
+    """
+
+    @staticmethod
+    def generate(
+        target_lang: str = "de",
+        english_title: str = "",
+        context_text: str = "",
+        gemini_api_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        lang_code = (target_lang or "de").lower().strip()
+        config = LANGUAGE_SEO_CONFIG.get(lang_code, {
+            "name": lang_code.upper(),
+            "native": lang_code.upper(),
+            "badge": f"IN {lang_code.upper()}",
+            "suffix": f"| Manhwa Recap {lang_code.upper()}",
+            "hook": "THE BOSS IS BACK!",
+            "hashtags": f"#ManhwaRecap #{lang_code.upper()}Recap #Manhwa #Anime",
+            "cta": "🔔 Subscribe for daily manhwa recaps! 👍 Leave a like!",
+            "tags": f"manhwa recap, manhwa recap {lang_code}, manhwa explained, manga recap",
+        })
+        lang_name = config["name"]
+        suffix = config["suffix"]
+
+        # 1. Try Gemini API if key is provided (or in environment)
+        api_key = (gemini_api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
+        if api_key:
+            logger.info(f"Generating {lang_name} ({lang_code}) YouTube metadata via Google Gemini API...")
+            try:
+                import requests
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+                prompt = f"""You are an expert YouTube automation manager specialized in Anime and Manhwa Recaps for {lang_name} audiences.
+Original English Video Title: {english_title}
+Story Context / Transcript Summary: {context_text[:2500]}
+Target Language: {lang_name} ({lang_code})
+
+Generate a complete high-CTR YouTube metadata package strictly in {lang_name} ({config['native']}) formatted in JSON with the following exact keys:
+{{
+  "title": "A high-CTR, click-worthy title in {lang_name} ending with '{suffix}' (max 95 chars)",
+  "thumbnail_hook": "A short, punchy 2-4 word hook in ALL CAPS in {lang_name} for the thumbnail overlay (e.g. {config['hook']})",
+  "description": "A full, engaging description in {lang_name} with synopsis, call to action (Like & Subscribe), chapter placeholders, and {lang_name} hashtags ({config['hashtags']})",
+  "tags": "Comma-separated list of 15 high-ranking YouTube tags in {lang_name}"
+}}
+Respond ONLY with valid JSON.
+"""
+                resp = requests.post(url, json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"response_mime_type": "application/json"}
+                }, timeout=15)
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+                    result = json.loads(raw_text)
+                    result["badge_text"] = config.get("badge", f"IN {lang_code.upper()}")
+                    result["lang"] = lang_code
+                    result["lang_name"] = lang_name
+                    logger.info(f"Successfully generated {lang_name} metadata via Gemini API.")
+                    return result
+                else:
+                    logger.warning(f"Gemini API returned status {resp.status_code}. Falling back to local template generator.")
+            except Exception as e:
+                logger.warning(f"Gemini API call failed: {e}. Falling back to local template generator.")
+
+        # 2. Local Fallback Generator
+        logger.info(f"Generating {lang_name} ({lang_code}) YouTube metadata via local translation & template engine...")
+        try:
+            from deep_translator import GoogleTranslator
+            tr = GoogleTranslator(source="auto", target=lang_code)
+            clean_en_title = english_title.replace(" | Manhwa Recap", "").replace("Manhwa Recap", "").strip()
+            translated_title = tr.translate(clean_en_title)
+        except Exception:
+            translated_title = english_title.replace(" | Manhwa Recap", "").strip()
+
+        t_title = translated_title.strip()
+        full_title = f"{t_title} {suffix}"
+        if len(full_title) > 95:
+            full_title = f"{t_title[:65]}... {suffix}"
+
+        desc = f"""{full_title}
+
+{config['cta']}
+
+---
+📌 Chapters / Timestamps:
+00:00 - Prologue
+05:30 - The Reincarnation
+12:45 - The Revenge Begins
+20:00 - Climax & Ending
+
+---
+⚠️ Disclaimer:
+This video is for entertainment and educational recap purposes under fair use. All rights belong to respective authors and artists.
+
+{config['hashtags']}
+"""
+        return {
+            "title": full_title,
+            "thumbnail_hook": config["hook"],
+            "description": desc.strip(),
+            "tags": config["tags"],
+            "badge_text": config.get("badge", f"IN {lang_code.upper()}"),
+            "lang": lang_code,
+            "lang_name": lang_name,
+        }
+
+
+class MultilingualThumbnailGenerator:
+    """
+    Renders YouTube standard 1280x720 thumbnails with localized hook text on top-left
+    and a dynamic localized badge in bottom-right corner based on the selected language.
+    """
+
+    @staticmethod
+    def generate_thumbnail(
+        video_path: Path,
+        hook_text: str,
+        output_path: Path,
+        lang_code: str = "de",
+        base_image: Optional[Path] = None
+    ) -> Path:
+        from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        bg = None
+
+        if base_image and Path(base_image).exists():
+            try:
+                bg = Image.open(base_image).convert("RGBA").resize((1280, 720), Image.Resampling.LANCZOS)
+            except Exception:
+                bg = None
+
+        if bg is None and video_path.exists():
+            temp_frame = output_path.parent / f"temp_thumb_{lang_code}.jpg"
+            try:
+                subprocess.run([
+                    "ffmpeg", "-y", "-ss", "00:00:15", "-i", str(video_path),
+                    "-vframes", "1", "-q:v", "2", str(temp_frame)
+                ], check=True, stderr=subprocess.DEVNULL)
+                if temp_frame.exists():
+                    bg = Image.open(temp_frame).convert("RGBA").resize((1280, 720), Image.Resampling.LANCZOS)
+                    temp_frame.unlink()
+            except Exception:
+                bg = None
+
+        if bg is None:
+            bg = Image.new("RGBA", (1280, 720), (14, 16, 28, 255))
+
+        enhancer = ImageEnhance.Color(bg)
+        bg = enhancer.enhance(1.22)
+        enhancer = ImageEnhance.Contrast(bg)
+        bg = enhancer.enhance(1.15)
+
+        overlay = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
+        draw_ov = ImageDraw.Draw(overlay)
+        for r in range(560, 0, -25):
+            a = int(195 * (1 - r / 560))
+            draw_ov.ellipse([-120 - r, -120 - r, -120 + r, -120 + r], fill=(0, 0, 0, a))
+        bg = Image.alpha_composite(bg, overlay)
+        draw = ImageDraw.Draw(bg)
+
+        # Hook Font
+        font_candidates = [
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+            "/System/Library/Fonts/Supplemental/Impact.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+        ]
+        impact_font = None
+        for fc in font_candidates:
+            if os.path.exists(fc):
+                try:
+                    impact_font = ImageFont.truetype(fc, 74)
+                    break
+                except Exception:
+                    pass
+        if impact_font is None:
+            impact_font = ImageFont.load_default()
+
+        cfg = LANGUAGE_SEO_CONFIG.get(lang_code.lower(), {})
+        clean_hook = (hook_text or cfg.get("hook", "THE BOSS IS BACK!")).strip().upper()
+        if "\n" in clean_hook:
+            lines = [l.strip() for l in clean_hook.split("\n") if l.strip()]
+        else:
+            words = clean_hook.split(" ")
+            if len(words) > 3 or len(clean_hook) > 18:
+                mid = len(words) // 2
+                lines = [" ".join(words[:mid]), " ".join(words[mid:])]
+            else:
+                lines = [clean_hook]
+
+        ty = 50
+        for line in lines[:2]:
+            tx = 55
+            for ox in range(-5, 6):
+                for oy in range(-5, 6):
+                    if ox*ox + oy*oy <= 30:
+                        draw.text((tx + ox, ty + oy), line, font=impact_font, fill=(0, 0, 0, 255))
+            for offset in range(6, 12):
+                draw.text((tx + offset, ty + offset), line, font=impact_font, fill=(0, 0, 0, 210))
+            draw.text((tx, ty), line, font=impact_font, fill=(255, 215, 0))
+            draw.text((tx, ty - 2), line, font=impact_font, fill=(255, 245, 170))
+            ty += 88
+
+        # Dynamic Bottom-Right Badge for this language!
+        badge_text = cfg.get("badge", f"IN {lang_code.upper()}").upper()
+        badge_font = None
+        badge_candidates = [
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+            "/System/Library/Fonts/Supplemental/Impact.ttf",
+        ]
+        for bc in badge_candidates:
+            if os.path.exists(bc):
+                try:
+                    badge_font = ImageFont.truetype(bc, 32)
+                    break
+                except Exception:
+                    pass
+        if badge_font is None:
+            badge_font = impact_font
+
+        bbox = badge_font.getbbox(badge_text)
+        bw = (bbox[2] - bbox[0]) + 48
+        bh = (bbox[3] - bbox[1]) + 26
+        bx = 1280 - bw - 40
+        by = 720 - bh - 35
+
+        # Shadow
+        draw.rounded_rectangle([bx + 4, by + 4, bx + bw + 4, by + bh + 4], radius=16, fill=(0, 0, 0, 180))
+        # Vivid red badge
+        draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=16, fill=(225, 29, 72, 255), outline=(255, 255, 255, 255), width=3)
+        # White bold text
+        draw.text((bx + 24, by + 10), badge_text, font=badge_font, fill=(255, 255, 255))
+
+        bg.convert("RGB").save(str(output_path), quality=96)
+        logger.info(f"Generated {lang_code.upper()} YouTube thumbnail (badge='{badge_text}'): {output_path}")
+        return output_path
+
+
+# Backward compatibility aliases
+class GermanMetadataGenerator:
+    @staticmethod
+    def generate(english_title: str, context_text: str = "", gemini_api_key: Optional[str] = None) -> Dict[str, Any]:
+        return MultilingualMetadataGenerator.generate(target_lang="de", english_title=english_title, context_text=context_text, gemini_api_key=gemini_api_key)
+
+
+class GermanThumbnailGenerator:
+    @staticmethod
+    def generate_thumbnail(video_path: Path, hook_text: str, output_path: Path, base_image: Optional[Path] = None) -> Path:
+        return MultilingualThumbnailGenerator.generate_thumbnail(video_path=video_path, hook_text=hook_text, output_path=output_path, lang_code="de", base_image=base_image)
+
+
+# ============================================================================
+# Master Orchestrator Pipeline
+# ============================================================================
+
+class ManhwaDubbingPipeline:
+    """
+    Complete end-to-end local dubbing pipeline coordinating all 5 steps.
+    """
+
+    def __init__(
+        self,
+        whisper_model: str = "base",
+        target_lang: str = "es",
+        translation_engine: str = "deep-translator",
+        tts_engine: str = "edge-tts",
+        tts_voice: Optional[str] = None,
+        voice_gender: Optional[str] = None,
+        voice_clone: bool = False,
+        bg_volume: float = 0.8,
+        vocals_volume: float = 1.0,
+        speed_cap: float = 1.15,
+        work_dir: Optional[Path] = None,
+        enable_watermark: bool = False,
+        watermark_text: Optional[str] = None,
+        watermark_interval: float = 3.0,
+        watermark_opacity: float = 0.40,
+        gemini_api_key: Optional[str] = None,
+    ):
+        self.whisper_model = whisper_model
+        self.target_lang = target_lang.lower()
+        self.translation_engine = translation_engine
+        self.tts_engine = tts_engine
+        self.voice_gender = voice_gender
+        self.tts_voice = tts_voice or resolve_voice(self.target_lang, voice_gender)
+        self.voice_clone = voice_clone
+        self.bg_volume = bg_volume
+        self.vocals_volume = vocals_volume
+        self.speed_cap = float(speed_cap)
+        self.work_dir = work_dir or Path("./workspace_dubbing")
+        self.enable_watermark = enable_watermark
+        self.watermark_text = watermark_text
+        self.watermark_interval = float(watermark_interval)
+        self.watermark_opacity = float(watermark_opacity)
+        self.gemini_api_key = (gemini_api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
+
+        # Initialize components
+        self.device = AppleSiliconManager.get_torch_device()
+        self.demixer = AudioDemixer(device=self.device)
+        self.transcriber = TimedTranscriber(model_size=self.whisper_model)
+        self.translator = SegmentTranslator(
+            engine=self.translation_engine,
+            target_lang=self.target_lang,
+            device=self.device
+        )
+        self.tts = TimestampAwareTTS(
+            engine=self.tts_engine,
+            target_lang=self.target_lang,
+            voice_clone=self.voice_clone,
+            voice_name=self.tts_voice,
+            voice_gender=self.voice_gender,
+            device=self.device,
+            speed_cap=self.speed_cap
+        )
+        self.remuxer = VideoRemuxer()
+
+    def run(
+        self,
+        video_path: str,
+        output_path: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        start_seconds: Optional[float] = None,
+        duration_seconds: Optional[float] = None,
+        part_name: Optional[str] = None,
+        target_langs: Optional[List[str]] = None,
+        enable_watermark: Optional[bool] = None,
+        watermark_text: Optional[str] = None,
+        watermark_interval: Optional[float] = None,
+        watermark_opacity: Optional[float] = None,
+        gemini_api_key: Optional[str] = None,
+        is_shorts_mode: bool = False,
+        generate_shorts: bool = False,
+        shorts_count: int = 3,
+        short_duration: float = 45.0,
+        shorts_aspect_ratio: str = "9:16",
+        selected_moment_index: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Executes the local AI dubbing pipeline. Supports multi-language batching
+        where audio separation and speech recognition run once, followed by
+        per-language translation, speech synthesis, and remuxing into dedicated subfolders.
+        
+        Args:
+            video_path: Path to input English MP4.
+            output_path: Optional explicit output path for single-language runs.
+            progress_callback: Optional callback func(progress_float, status_str).
+            start_seconds: Optional start timestamp to trim/extract a specific part.
+            duration_seconds: Optional duration in seconds to trim.
+            part_name: Optional part label (e.g. 'part_1').
+            target_langs: Optional list of language ISO codes (e.g. ['de', 'fr', 'id']).
+            
+        Returns:
+            Dict containing language folders, final videos, stems, and metadata.
+        """
+        input_video = Path(video_path).resolve()
+        if not input_video.exists():
+            raise FileNotFoundError(f"Input video not found: {input_video}")
+
+        if not AppleSiliconManager.verify_ffmpeg():
+            raise RuntimeError("FFmpeg is missing from PATH. Install with `brew install ffmpeg`.")
+
+        job_dir = self.work_dir if ("job" in str(self.work_dir).lower() or self.work_dir.name == input_video.stem) else (self.work_dir / input_video.stem)
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        def report(progress: float, message: str):
+            logger.info(f"[{int(progress * 100)}%] {message}")
+            if progress_callback:
+                progress_callback(progress, message)
+
+        # Parse & normalize list of target languages
+        langs = [l.strip().lower() for l in target_langs if l.strip()] if target_langs else [self.target_lang]
+        if not langs:
+            langs = [self.target_lang]
+        # Deduplicate while preserving order
+        langs = list(dict.fromkeys(langs))
+        is_multi = len(langs) > 1
+
+        # Handle splitting / trimming into parts before processing
+        if (start_seconds is not None and start_seconds > 0) or (duration_seconds is not None and duration_seconds > 0):
+            part_tag = part_name or f"part_{int(start_seconds or 0)}_{int(duration_seconds or 0)}"
+            trimmed_source = job_dir / f"{input_video.stem}_{part_tag}.mp4"
+            report(0.03, f"Extracting video part ({int(start_seconds or 0)}s - {int((start_seconds or 0) + (duration_seconds or 0))}s)...")
+            input_video = VideoSegmenter.trim(
+                input_video=input_video,
+                output_video=trimmed_source,
+                start_seconds=start_seconds or 0.0,
+                duration_seconds=duration_seconds
+            )
+
+        try:
+            # Step 1: Audio Extraction & Demixing (Vocals vs BGM/SFX - runs ONCE for all languages)
+            report(0.05, "Step 1 of 5: Extracting audio and demixing vocals from BGM/SFX...")
+            extracted_audio = job_dir / "original_audio.wav"
+            self.demixer.extract_audio(input_video, extracted_audio)
+            
+            vocals_path, bg_path = self.demixer.separate_audio(extracted_audio, job_dir)
+            total_duration = self.tts.get_audio_duration(extracted_audio)
+            report(0.25, "Step 1 of 5 complete: Vocals and background audio separated.")
+
+            # Step 2: Timed Transcription (English speech to text - runs ONCE for all languages)
+            report(0.30, "Step 2 of 5: Transcribing English vocals into timed segments...")
+            segments = self.transcriber.transcribe(vocals_path)
+            if not segments:
+                raise ValueError("No speech segments detected in vocals track.")
+            
+            # Save master English transcription in job root directory
+            english_transcript_file = job_dir / "english_transcript.json"
+            with open(english_transcript_file, "w", encoding="utf-8") as f:
+                json.dump(segments, f, indent=2, ensure_ascii=False)
+            report(0.50, f"Step 2 of 5 complete: {len(segments)} segments transcribed.")
+
+            # Steps 3 to 5: Translate, Synthesize TTS, and Remux into Separate Folder Per Language
+            languages_result: Dict[str, Any] = {}
+            total_langs = len(langs)
+            lang_progress_budget = 0.48 / total_langs
+
+            for idx, lang in enumerate(langs):
+                lang_name = LANGUAGE_NAMES.get(lang, lang.capitalize())
+                lang_dir = job_dir / lang_name
+                lang_dir.mkdir(parents=True, exist_ok=True)
+
+                lang_base_pct = 0.50 + idx * lang_progress_budget
+                lang_label = f"[{lang_name} ({idx + 1}/{total_langs})]" if is_multi else f"[{lang_name}]"
+
+                # Step 3: Text Translation for this language
+                report(
+                    lang_base_pct + 0.10 * lang_progress_budget,
+                    f"{lang_label} Translating dialogue segments into {lang_name}..."
+                )
+                translator = SegmentTranslator(
+                    engine=self.translation_engine,
+                    target_lang=lang,
+                    device=self.device
+                )
+                translated_segments = translator.translate_segments(segments)
+
+                # Save language-specific transcript JSON in its own folder
+                lang_transcript_json = lang_dir / f"segments_{lang}.json"
+                with open(lang_transcript_json, "w", encoding="utf-8") as f:
+                    json.dump(translated_segments, f, indent=2, ensure_ascii=False)
+
+                # Step 4: Timestamp-Aware TTS for this language
+                if not is_multi and self.tts_voice and self.target_lang == lang:
+                    lang_voice = self.tts_voice
+                else:
+                    lang_voice = resolve_voice(lang, self.voice_gender)
+
+                report(
+                    lang_base_pct + 0.40 * lang_progress_budget,
+                    f"{lang_label} Synthesizing speech timeline with native voice ({lang_voice})..."
+                )
+                tts_inst = TimestampAwareTTS(
+                    engine=self.tts_engine,
+                    target_lang=lang,
+                    voice_clone=self.voice_clone,
+                    voice_name=lang_voice,
+                    voice_gender=self.voice_gender,
+                    device=self.device,
+                    speed_cap=self.speed_cap
+                )
+                lang_dubbed_vocals = lang_dir / f"{lang}_vocals.wav"
+                tts_inst.generate_and_align(
+                    segments=translated_segments,
+                    reference_vocals_path=vocals_path if self.voice_clone else None,
+                    output_spanish_vocals=lang_dubbed_vocals,
+                    total_duration=total_duration,
+                    temp_dir=lang_dir,
+                    auto_speed_adjust=True,
+                    speed_cap=self.speed_cap
+                )
+
+                # Step 5: Audio Re-muxing & Video Export for this language
+                report(
+                    lang_base_pct + 0.85 * lang_progress_budget,
+                    f"{lang_label} Mixing {lang_name} audio & remuxing video stream..."
+                )
+                lang_output_video = lang_dir / f"{input_video.stem}_{lang_name}_dubbed.mp4"
+                # Determine effective watermark settings
+                effective_enable_wm = self.enable_watermark if enable_watermark is None else enable_watermark
+                effective_wm_text = watermark_text if watermark_text is not None else self.watermark_text
+                effective_wm_interval = watermark_interval if watermark_interval is not None else self.watermark_interval
+                effective_wm_opacity = watermark_opacity if watermark_opacity is not None else self.watermark_opacity
+
+                self.remuxer.remux_and_export(
+                    original_video=input_video,
+                    spanish_vocals=lang_dubbed_vocals,
+                    background_audio=bg_path,
+                    output_video=lang_output_video,
+                    bg_volume=self.bg_volume,
+                    vocals_volume=self.vocals_volume,
+                    watermark_text=effective_wm_text if effective_enable_wm else None,
+                    watermark_interval=effective_wm_interval,
+                    watermark_opacity=effective_wm_opacity,
+                )
+
+                # Step 5b: Generate YouTube SEO Pack and Thumbnail (Only for Full video or First Part)
+                is_first_part_or_full = (
+                    (start_seconds is None or start_seconds == 0.0) or
+                    (part_name and any(p in part_name.lower() for p in ["part_1", "part 1", "part_0", "part 0"]))
+                )
+                meta_result = None
+                thumb_result = None
+                if is_first_part_or_full:
+                    report(
+                        lang_base_pct + 0.95 * lang_progress_budget,
+                        f"{lang_label} Generating YouTube SEO Pack & Thumbnail ({lang_name})..."
+                    )
+                    try:
+                        active_key = gemini_api_key or self.gemini_api_key
+                        video_title_hint = input_video.stem.replace("_", " ")
+                        summary_hint = " ".join([s.get("translated_text", "") for s in translated_segments[:15]])
+                        seo_meta = MultilingualMetadataGenerator.generate(
+                            target_lang=lang,
+                            english_title=video_title_hint,
+                            context_text=summary_hint,
+                            gemini_api_key=active_key
+                        )
+
+                        meta_json_path = lang_dir / f"metadata_{lang}.json"
+                        with open(meta_json_path, "w", encoding="utf-8") as f:
+                            json.dump(seo_meta, f, indent=2, ensure_ascii=False)
+
+                        meta_txt_path = lang_dir / f"youtube_metadata_{lang}.txt"
+                        with open(meta_txt_path, "w", encoding="utf-8") as f:
+                            f.write(f"TITEL / TITLE:\n{seo_meta['title']}\n\n")
+                            f.write(f"BESCHREIBUNG / DESCRIPTION:\n{seo_meta['description']}\n\n")
+                            f.write(f"TAGS:\n{seo_meta['tags']}\n")
+
+                        # Backward compatibility copy for German
+                        if lang == "de":
+                            with open(lang_dir / "metadata_german.json", "w", encoding="utf-8") as f:
+                                json.dump(seo_meta, f, indent=2, ensure_ascii=False)
+
+                        thumb_out_path = lang_dir / f"thumbnail_{lang}.jpg"
+                        MultilingualThumbnailGenerator.generate_thumbnail(
+                            video_path=lang_output_video,
+                            hook_text=seo_meta.get("thumbnail_hook", ""),
+                            output_path=thumb_out_path,
+                            lang_code=lang
+                        )
+
+                        if lang == "de":
+                            shutil.copyfile(str(thumb_out_path), str(lang_dir / "thumbnail_german.jpg"))
+
+                        meta_result = seo_meta
+                        thumb_result = str(thumb_out_path)
+                    except Exception as meta_err:
+                        logger.warning(f"{lang_name} SEO pack generation failed: {meta_err}")
+
+                languages_result[lang] = {
+                    "lang": lang,
+                    "lang_name": lang_name,
+                    "folder": str(lang_dir),
+                    "final_video": str(lang_output_video),
+                    "dub_vocals": str(lang_dubbed_vocals),
+                    "segments_json": str(lang_transcript_json),
+                    "segments": translated_segments,
+                    "voice": lang_voice,
+                    "metadata": meta_result,
+                    "thumbnail": thumb_result,
+                }
+
+            # Generate Instagram & YouTube Shorts if requested
+            should_gen_shorts = generate_shorts or is_shorts_mode
+            if should_gen_shorts:
+                report(0.96, f"Generating Top {shorts_count} Instagram Reels / YouTube Shorts (9:16 vertical)...")
+                top_moments = ShortsGenerator.detect_top_moments(
+                    video_path=input_video,
+                    audio_path=extracted_audio,
+                    duration_seconds=total_duration,
+                    num_moments=shorts_count,
+                    moment_duration=short_duration,
+                )
+                for l_code, l_info in languages_result.items():
+                    lang_video_file = Path(l_info["final_video"])
+                    lang_folder_p = Path(l_info["folder"])
+                    shorts_dir = lang_folder_p / "Shorts"
+                    shorts_dir.mkdir(parents=True, exist_ok=True)
+                    lang_shorts = []
+                    for m in top_moments:
+                        short_clean_time = m["time_range"].replace(":", "-").replace(" ", "")
+                        short_fname = f"short_{m['index']}_{short_clean_time}.mp4"
+                        short_dest = shorts_dir / short_fname
+                        try:
+                            ShortsGenerator.create_vertical_short(
+                                input_video=lang_video_file,
+                                output_path=short_dest,
+                                start_seconds=m["start_seconds"],
+                                duration_seconds=m["duration_seconds"],
+                                aspect_ratio=shorts_aspect_ratio,
+                            )
+                            lang_shorts.append({
+                                "index": m["index"],
+                                "title": m["title"],
+                                "category": m["category"],
+                                "time_range": m["time_range"],
+                                "start_seconds": m["start_seconds"],
+                                "duration_seconds": m["duration_seconds"],
+                                "filename": short_fname,
+                                "file_path": str(short_dest),
+                                "aspect_ratio": shorts_aspect_ratio,
+                            })
+                        except Exception as s_err:
+                            logger.warning(f"Could not generate short #{m['index']} for {l_code}: {s_err}")
+                    l_info["shorts"] = lang_shorts
+
+            primary_lang = langs[0]
+            primary_info = languages_result[primary_lang]
+            primary_video_path = Path(primary_info["final_video"])
+
+            # If user provided a specific single output path, copy the primary result there
+            if output_path and not is_multi:
+                custom_out = Path(output_path).resolve()
+                if custom_out != primary_video_path:
+                    custom_out.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(str(primary_video_path), str(custom_out))
+                    primary_video_path = custom_out
+
+            # Save default segments_translated.json in job root for backward compatibility
+            with open(job_dir / "segments_translated.json", "w", encoding="utf-8") as f:
+                json.dump(primary_info["segments"], f, indent=2, ensure_ascii=False)
+
+            # Create clean ZIP archive bundling all language folders and shorts
+            zip_path = job_dir / "all_dubbed_languages.zip"
+            try:
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                    for l_code, l_info in languages_result.items():
+                        l_folder = Path(l_info["folder"])
+                        if l_folder.exists():
+                            for f in l_folder.rglob("*"):
+                                if f.is_file() and not f.name.startswith("chunk_"):
+                                    rel = f.relative_to(l_folder)
+                                    zipf.write(f, arcname=f"{l_info['lang_name']}/{rel}")
+                    if english_transcript_file.exists():
+                        zipf.write(english_transcript_file, arcname="shared/english_transcript.json")
+                    if bg_path.exists():
+                        zipf.write(bg_path, arcname="shared/background_music_sfx.wav")
+            except Exception as e:
+                logger.warning(f"Could not build ZIP archive: {e}")
+
+            report(
+                1.0,
+                f"Dubbing complete for {len(langs)} language(s)! Stored in separate folders under {job_dir.name}/"
+            )
+
+            metadata_by_lang = {
+                l: info.get("metadata")
+                for l, info in languages_result.items()
+                if info.get("metadata")
+            }
+            thumbnails_by_lang = {
+                l: info.get("thumbnail")
+                for l, info in languages_result.items()
+                if info.get("thumbnail")
+            }
+
+            return {
+                "is_multi_language": is_multi,
+                "target_langs": langs,
+                "languages": languages_result,
+                "final_video": str(primary_video_path),
+                "original_audio": str(extracted_audio),
+                "vocals": str(vocals_path),
+                "background": str(bg_path),
+                "dub_vocals": primary_info["dub_vocals"],
+                "spanish_vocals": primary_info["dub_vocals"],
+                "segments": primary_info["segments"],
+                "total_duration": total_duration,
+                "zip_path": str(zip_path) if zip_path.exists() else None,
+                "metadata": primary_info.get("metadata"),
+                "thumbnail": primary_info.get("thumbnail"),
+                "metadata_by_lang": metadata_by_lang,
+                "thumbnails_by_lang": thumbnails_by_lang,
+                "shorts": primary_info.get("shorts", []),
+                "is_shorts_mode": is_shorts_mode,
+            }
+
+        except Exception as e:
+            logger.exception(f"Pipeline failed during execution: {e}")
+            raise
