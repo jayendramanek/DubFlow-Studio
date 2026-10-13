@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Set
 from concurrent.futures import ThreadPoolExecutor
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from fastapi import (
     FastAPI,
     UploadFile,
@@ -64,6 +70,12 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 VIDEOS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Restore or detect YouTube cookies from environment / disk (supports VM / Docker deployments)
+try:
+    find_cookies_file()
+except Exception:
+    pass
 
 
 def extract_youtube_id(url: Optional[str]) -> Optional[str]:
@@ -807,9 +819,34 @@ class YouTubePasteCookiesRequest(BaseModel):
     cookies_text: str
 
 
+def _sync_cookies_to_env(cookies_text: str):
+    """Saves base64-encoded cookies to .env so VM / Docker deployments retain authenticated sessions."""
+    import base64
+    try:
+        b64 = base64.b64encode(cookies_text.encode("utf-8")).decode("utf-8")
+        env_path = BASE_DIR / ".env"
+        content = env_path.read_text() if env_path.exists() else ""
+        lines = content.splitlines()
+        new_lines = []
+        found = False
+        for line in lines:
+            if line.startswith("YOUTUBE_COOKIES_B64="):
+                new_lines.append(f"YOUTUBE_COOKIES_B64={b64}")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append(f"YOUTUBE_COOKIES_B64={b64}")
+        env_path.write_text("\n".join(new_lines) + "\n")
+        os.environ["YOUTUBE_COOKIES_B64"] = b64
+    except Exception as e:
+        logger.warning(f"Could not persist cookies to .env: {e}")
+
+
 @app.get("/api/youtube/auth-status", tags=["YouTube Auth"])
 def get_youtube_auth_status():
     """Returns current YouTube authentication, account credentials, and cookies status."""
+    import platform
     email = os.getenv("YOUTUBE_EMAIL", "manhwadesistyle@gmail.com")
     cookie_file = find_cookies_file()
     has_cookies = cookie_file is not None and cookie_file.exists() and cookie_file.stat().st_size > 100
@@ -821,6 +858,7 @@ def get_youtube_auth_status():
         except Exception:
             pass
 
+    system_name = platform.system()
     return {
         "email": email,
         "has_password": bool(os.getenv("YOUTUBE_PASSWORD", "G00gle@123")),
@@ -828,14 +866,21 @@ def get_youtube_auth_status():
         "cookie_count": cookie_count,
         "cookie_file": str(cookie_file) if cookie_file else None,
         "status": "ready" if has_cookies else "unauthenticated",
+        "is_vm": system_name != "Darwin",
+        "os_name": system_name,
+        "has_env_backup": bool(os.getenv("YOUTUBE_COOKIES_B64")),
     }
 
 
 @app.post("/api/youtube/sync-cookies", tags=["YouTube Auth"])
 def post_sync_youtube_cookies(req: Optional[YouTubeSyncRequest] = None):
-    """Syncs YouTube/Google cookies directly from local browser (Chrome) into cookies.txt."""
+    """Syncs YouTube/Google cookies from local browser into cookies.txt and .env."""
     browser = req.browser if req and req.browser else "chrome"
     success, message = sync_browser_cookies(browser=browser)
+    if success:
+        cookie_file = find_cookies_file()
+        if cookie_file and cookie_file.exists():
+            _sync_cookies_to_env(cookie_file.read_text())
     return {
         "success": success,
         "message": message,
@@ -882,17 +927,82 @@ def post_update_youtube_credentials(req: YouTubeCredentialsRequest):
 
 @app.post("/api/youtube/paste-cookies", tags=["YouTube Auth"])
 def post_paste_youtube_cookies(req: YouTubePasteCookiesRequest):
-    """Saves pasted Netscape cookies.txt directly to project root."""
+    """Saves pasted Netscape cookies.txt directly to project root, workspace, and .env."""
+    raw = req.cookies_text.strip()
+    if len(raw) < 50:
+        raise HTTPException(status_code=400, detail="Cookies content is too short or invalid.")
+
     target_path = BASE_DIR / "cookies.txt"
     try:
-        target_path.write_text(req.cookies_text.strip() + "\n")
+        target_path.write_text(raw + "\n")
+        # Mirror to workspace
+        try:
+            mirror = BASE_DIR / "workspace_api" / "cookies.txt"
+            mirror.parent.mkdir(parents=True, exist_ok=True)
+            mirror.write_text(raw + "\n")
+        except Exception:
+            pass
+
+        # Also persist to .env
+        _sync_cookies_to_env(raw)
+
         return {
             "success": True,
-            "message": f"Successfully saved {len(req.cookies_text)} characters to cookies.txt",
+            "message": f"Successfully installed cookies ({len(raw)} characters). Ready for VM downloads.",
             "auth_status": get_youtube_auth_status()
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write cookies.txt: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to write cookies: {e}")
+
+
+@app.post("/api/youtube/upload-cookies", tags=["YouTube Auth"])
+async def post_upload_youtube_cookies(file: UploadFile = File(...)):
+    """Uploads a cookies.txt file to authenticate YouTube downloads on this server/VM."""
+    content = await file.read()
+    try:
+        text_content = content.decode("utf-8")
+    except UnicodeDecodeError:
+        text_content = content.decode("latin-1", errors="ignore")
+
+    raw = text_content.strip()
+    if len(raw) < 50:
+        raise HTTPException(status_code=400, detail="Uploaded cookie file is empty or invalid.")
+
+    target_path = BASE_DIR / "cookies.txt"
+    try:
+        target_path.write_text(raw + "\n")
+        # Mirror to workspace
+        try:
+            mirror = BASE_DIR / "workspace_api" / "cookies.txt"
+            mirror.parent.mkdir(parents=True, exist_ok=True)
+            mirror.write_text(raw + "\n")
+        except Exception:
+            pass
+
+        # Also persist to .env
+        _sync_cookies_to_env(raw)
+
+        return {
+            "success": True,
+            "message": f"Successfully uploaded cookies.txt ({len(content)} bytes). Active on this VM.",
+            "auth_status": get_youtube_auth_status()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save cookies: {e}")
+
+
+@app.get("/api/youtube/export-cookies", tags=["YouTube Auth"])
+def get_export_youtube_cookies():
+    """Downloads the active cookies.txt file as an attachment to easily transfer to a remote VM."""
+    cookie_file = find_cookies_file()
+    if not cookie_file or not cookie_file.exists():
+        raise HTTPException(status_code=404, detail="No active cookies.txt file found to export.")
+    return FileResponse(
+        path=str(cookie_file),
+        filename="cookies.txt",
+        media_type="text/plain"
+    )
+
 
 
 

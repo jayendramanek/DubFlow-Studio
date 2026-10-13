@@ -568,6 +568,10 @@ export default function App() {
   const [editingChannel, setEditingChannel] = useState(null);
   const [downloadModalVideo, setDownloadModalVideo] = useState(null);
 
+  const [showCookieTools, setShowCookieTools] = useState(false);
+  const [pastedCookies, setPastedCookies] = useState("");
+  const [isSavingCookies, setIsSavingCookies] = useState(false);
+
   const fetchYtAuthStatus = async () => {
     try {
       const res = await fetch("/api/youtube/auth-status");
@@ -595,6 +599,53 @@ export default function App() {
       alert("Error syncing cookies: " + e.message);
     } finally {
       setIsSyncingYtCookies(false);
+    }
+  };
+
+  const handleUploadCookieFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await fetch("/api/youtube/upload-cookies", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      if (res.ok) {
+        if (data.auth_status) setYtAuthStatus(data.auth_status);
+        alert(data.message || "Cookies installed successfully on this server!");
+      } else {
+        alert("Upload failed: " + (data.detail || "Unknown error"));
+      }
+    } catch (err) {
+      alert("Upload error: " + err.message);
+    }
+  };
+
+  const handleSavePastedCookies = async () => {
+    if (!pastedCookies.trim()) return;
+    setIsSavingCookies(true);
+    try {
+      const res = await fetch("/api/youtube/paste-cookies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookies_text: pastedCookies.trim() }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        if (data.auth_status) setYtAuthStatus(data.auth_status);
+        alert(data.message || "Cookies saved successfully!");
+        setPastedCookies("");
+        setShowCookieTools(false);
+      } else {
+        alert("Failed: " + (data.detail || "Error saving cookies"));
+      }
+    } catch (err) {
+      alert("Error: " + err.message);
+    } finally {
+      setIsSavingCookies(false);
     }
   };
 
@@ -1876,40 +1927,106 @@ export default function App() {
             <h3 className="text-lg font-bold text-white mb-2">Add New Video Project</h3>
 
             {/* YouTube Account & Cookie Auth Badge */}
-            <div className="flex items-center justify-between p-3 rounded-xl bg-surface-900 border border-slate-700/80 mb-4">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-red-600/20 text-red-400 flex items-center justify-center font-bold text-xs border border-red-500/20">
-                  YT
+            {/* YouTube Account & Cookie Auth Badge */}
+            <div className="p-3 rounded-xl bg-surface-900 border border-slate-700/80 mb-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-red-600/20 text-red-400 flex items-center justify-center font-bold text-xs border border-red-500/20 flex-shrink-0">
+                    YT
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                      <span>{ytAuthStatus?.email || "manhwadesistyle@gmail.com"}</span>
+                      {ytAuthStatus?.has_cookies ? (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30 flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                          <span>Logged In ({ytAuthStatus?.cookie_count || 511} cookies)</span>
+                        </span>
+                      ) : (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30">
+                          Cookie Needed on VM
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Bypasses bot checks & sign-in requirements on Mac and Linux VMs
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                    <span>{ytAuthStatus?.email || "manhwadesistyle@gmail.com"}</span>
-                    {ytAuthStatus?.has_cookies ? (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30 flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                        <span>Logged In ({ytAuthStatus?.cookie_count || 511} cookies)</span>
-                      </span>
-                    ) : (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30">
-                        Cookie Sync Needed
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">
-                    Authenticates YouTube downloads to prevent bot & sign-in blocks
-                  </div>
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleSyncYtCookies}
+                    disabled={isSyncingYtCookies}
+                    className="px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-200 border border-white/5 text-xs font-semibold transition flex items-center gap-1 flex-shrink-0"
+                    title="Sync latest YouTube session cookies from Chrome"
+                  >
+                    <span>{isSyncingYtCookies ? "Syncing..." : "🔄 Re-sync"}</span>
+                  </button>
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={handleSyncYtCookies}
-                disabled={isSyncingYtCookies}
-                className="px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-200 border border-white/5 text-xs font-semibold transition flex items-center gap-1 flex-shrink-0"
-                title="Sync latest YouTube session cookies from Chrome"
-              >
-                <span>{isSyncingYtCookies ? "Syncing..." : "🔄 Re-sync"}</span>
-              </button>
+              {/* VM Transfer and Cookie Management Toggle */}
+              <div className="pt-1 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setShowCookieTools(!showCookieTools)}
+                  className="text-brand-400 hover:text-brand-300 font-semibold inline-flex items-center gap-1 transition"
+                >
+                  <span>{showCookieTools ? "▾ Hide VM / Remote Server Tools" : "▸ VM & Cookie Transfer Tools"}</span>
+                </button>
+                <div className="flex items-center gap-2">
+                  <a
+                    href="/api/youtube/export-cookies"
+                    download="cookies.txt"
+                    className="text-slate-400 hover:text-white transition font-medium underline"
+                    title="Download active cookies.txt to transfer to VM"
+                  >
+                    Export cookies.txt
+                  </a>
+                  {ytAuthStatus?.is_vm && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                      VM Mode
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Expandable VM Cookie Upload / Paste Drawer */}
+              {showCookieTools && (
+                <div className="p-3 rounded-lg bg-surface-950 border border-slate-800 space-y-2 mt-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-bold text-slate-300">Set Cookies for Remote VM</span>
+                    <label className="px-2.5 py-1 rounded bg-brand-600/30 hover:bg-brand-600/50 text-brand-200 border border-brand-500/30 font-semibold cursor-pointer transition text-[11px]">
+                      <span>📁 Upload cookies.txt</span>
+                      <input type="file" accept=".txt" onChange={handleUploadCookieFile} className="hidden" />
+                    </label>
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    If this server is running on a cloud VM without a desktop browser: download cookies.txt from your local Mac, then upload or paste below.
+                  </p>
+                  <div className="space-y-1.5">
+                    <textarea
+                      rows="2"
+                      value={pastedCookies}
+                      onChange={(e) => setPastedCookies(e.target.value)}
+                      placeholder="Paste Netscape cookies.txt content here..."
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-surface-900 border border-slate-700 font-mono text-[10px] text-slate-200 outline-none focus:border-brand-500"
+                    />
+                    {pastedCookies && (
+                      <button
+                        type="button"
+                        onClick={handleSavePastedCookies}
+                        disabled={isSavingCookies}
+                        className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] transition"
+                      >
+                        {isSavingCookies ? "Saving..." : "Install Cookies on VM"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             <form

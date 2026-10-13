@@ -22,6 +22,12 @@ import platform
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Callable
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Ensure PyTorch MPS Fallback is active before importing torch if on macOS
 if platform.system() == "Darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -137,12 +143,38 @@ AppleSiliconManager = HardwareAccelerationManager
 # ============================================================================
 
 def find_cookies_file() -> Optional[Path]:
-    """Finds a valid Netscape cookies.txt file in project paths."""
+    """Finds a valid Netscape cookies.txt file across environment variables and project paths."""
+    # 1. Check base64 encoded cookies in environment (ideal for Docker / headless VM deployments)
+    b64_env = os.getenv("YOUTUBE_COOKIES_B64")
+    if b64_env:
+        try:
+            import base64
+            decoded = base64.b64decode(b64_env).decode("utf-8", errors="ignore")
+            if len(decoded) > 100:
+                target = Path(__file__).resolve().parent / "cookies.txt"
+                target.write_text(decoded)
+                return target
+        except Exception as e:
+            logger.warning(f"Could not load cookies from YOUTUBE_COOKIES_B64: {e}")
+
+    raw_env = os.getenv("YOUTUBE_COOKIES")
+    if raw_env and len(raw_env) > 100:
+        try:
+            target = Path(__file__).resolve().parent / "cookies.txt"
+            target.write_text(raw_env)
+            return target
+        except Exception as e:
+            logger.warning(f"Could not load cookies from YOUTUBE_COOKIES: {e}")
+
+    # 2. Check candidate filesystem paths on Mac or Linux VM
+    base_dir = Path(__file__).resolve().parent
     candidates = [
+        base_dir / "cookies.txt",
         Path("cookies.txt"),
-        Path(__file__).resolve().parent / "cookies.txt",
+        base_dir / "workspace_api" / "cookies.txt",
         Path("workspace_api/cookies.txt"),
-        Path(__file__).resolve().parent / "workspace_api" / "cookies.txt",
+        Path.home() / ".dubflow" / "cookies.txt",
+        Path("/etc/dubflow/cookies.txt"),
     ]
     for p in candidates:
         if p.exists() and p.stat().st_size > 100:
@@ -150,25 +182,47 @@ def find_cookies_file() -> Optional[Path]:
     return None
 
 
-def sync_browser_cookies(browser: str = "chrome", target_path: Optional[Path] = None) -> Tuple[bool, str]:
-    """Extracts YouTube/Google cookies from browser into cookies.txt."""
+def sync_browser_cookies(browser: Optional[str] = "chrome", target_path: Optional[Path] = None) -> Tuple[bool, str]:
+    """
+    Extracts YouTube/Google cookies from browser into cookies.txt.
+    Supports macOS, Linux desktop, and headless VM fallback.
+    """
     if target_path is None:
         target_path = Path(__file__).resolve().parent / "cookies.txt"
-    try:
-        import yt_dlp
-        ydl_opts = {
-            "cookiesfrombrowser": (browser, None, None, None),
-            "cookiefile": str(target_path),
-            "quiet": True,
-            "no_warnings": True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            pass
-        if target_path.exists() and target_path.stat().st_size > 100:
-            return True, f"Successfully synced cookies from {browser} ({target_path.stat().st_size} bytes)"
-        return False, f"Failed to sync cookies from {browser}: empty cookie file generated"
-    except Exception as e:
-        return False, str(e)
+
+    import yt_dlp
+
+    browsers_to_try = [browser] if browser and browser != "auto" else ["chrome", "chromium", "firefox", "brave", "edge"]
+    last_err = ""
+
+    for b in browsers_to_try:
+        try:
+            ydl_opts = {
+                "cookiesfrombrowser": (b, None, None, None),
+                "cookiefile": str(target_path),
+                "quiet": True,
+                "no_warnings": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                pass
+            if target_path.exists() and target_path.stat().st_size > 100:
+                # Also mirror to workspace_api/cookies.txt for persistent volume storage on VM
+                try:
+                    mirror_path = Path(__file__).resolve().parent / "workspace_api" / "cookies.txt"
+                    mirror_path.parent.mkdir(parents=True, exist_ok=True)
+                    mirror_path.write_bytes(target_path.read_bytes())
+                except Exception:
+                    pass
+                return True, f"Successfully synced cookies from {b} ({target_path.stat().st_size} bytes)"
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+    return False, (
+        f"Could not extract browser cookies ({last_err}). "
+        f"If running on a headless VM without a desktop browser, please upload/paste cookies.txt via the Web UI "
+        f"or set YOUTUBE_COOKIES_B64 in your .env file."
+    )
 
 
 class YouTubeDownloader:
@@ -190,6 +244,7 @@ class YouTubeDownloader:
             "quiet": True,
             "no_warnings": True,
             "remote_components": ["ejs:github"],
+            "js_runtimes": {"deno": None, "node": None, "quickjs": None},
             "extractor_args": {
                 "youtube": {
                     "player_client": clients
