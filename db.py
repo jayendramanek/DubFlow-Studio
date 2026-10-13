@@ -343,13 +343,26 @@ def get_system_stats(jobs_db: Dict[str, Any], videos_db: Dict[str, Any]) -> Dict
         if st in ["queued", "processing"]:
             vid_id = j.get("video_id")
             vid_title = None
-            if vid_id and vid_id in videos_db:
-                vid_title = videos_db[vid_id].get("title")
+            if vid_id:
+                if vid_id in videos_db:
+                    vid_title = videos_db[vid_id].get("title")
+                else:
+                    alt_id = f"vid_{vid_id}" if not vid_id.startswith("vid_") else vid_id.replace("vid_", "", 1)
+                    if alt_id in videos_db:
+                        vid_title = videos_db[alt_id].get("title")
+
+            part_label = j.get("part_name")
+            display_title = vid_title or part_label or "Video Conversion"
+            if vid_title and part_label:
+                display_title = f"{vid_title} ({part_label})"
+            elif vid_title and not part_label:
+                display_title = f"{vid_title} (Full Video)"
 
             job_info = {
                 "job_id": j.get("job_id"),
                 "video_id": vid_id,
                 "video_title": vid_title,
+                "display_title": display_title,
                 "status": st,
                 "progress": j.get("progress", 0.0),
                 "current_step": j.get("current_step", "In queue..."),
@@ -403,8 +416,8 @@ def get_system_stats(jobs_db: Dict[str, Any], videos_db: Dict[str, Any]) -> Dict
         qj["estimated_duration_formatted"] = format_duration_human(q_dur)
         queued_durations.append(q_dur)
 
-    # Concurrency in ThreadPoolExecutor is 2
-    concurrency = 2
+    # Concurrency in ThreadPoolExecutor is 1 (sequential worker pipeline to keep Apple Silicon RAM under 8GB)
+    concurrency = 1
     proc_work = sum(proc_rem_seconds)
     queued_work = sum(queued_durations)
     total_work = proc_work + queued_work

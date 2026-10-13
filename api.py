@@ -86,8 +86,8 @@ def extract_youtube_id(url: Optional[str]) -> Optional[str]:
 
 import db
 
-# Thread pool for CPU/GPU intensive background dubbing tasks
-executor = ThreadPoolExecutor(max_workers=2)
+# Sequential thread pool executor (1 worker active at a time to optimize Apple Silicon RAM/GPU; subsequent videos/parts wait in queue)
+executor = ThreadPoolExecutor(max_workers=1)
 
 class JobCancelledException(Exception):
     """Raised when a dubbing job is cancelled by the user."""
@@ -348,6 +348,13 @@ def run_dubbing_job_sync(
 
     job["status"] = "processing"
     job["started_at"] = time.time()
+    db.update_video_on_job_progress(job_id, "processing", job.get("progress", 0.01), videos_db, BASE_DIR / "workspace_api", jobs_db)
+    notify_ws_clients(job_id, {
+        "type": "status",
+        "status": "processing",
+        "progress": job.get("progress", 0.01),
+        "step": "Starting video conversion..."
+    })
     job_folder = JOBS_DIR / job_id
     job_folder.mkdir(parents=True, exist_ok=True)
 
