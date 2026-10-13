@@ -134,8 +134,82 @@ AppleSiliconManager = HardwareAccelerationManager
 # YouTube Downloader
 # ============================================================================
 
+# ============================================================================
+
+def find_cookies_file() -> Optional[Path]:
+    """Finds a valid Netscape cookies.txt file in project paths."""
+    candidates = [
+        Path("cookies.txt"),
+        Path(__file__).resolve().parent / "cookies.txt",
+        Path("workspace_api/cookies.txt"),
+        Path(__file__).resolve().parent / "workspace_api" / "cookies.txt",
+    ]
+    for p in candidates:
+        if p.exists() and p.stat().st_size > 100:
+            return p
+    return None
+
+
+def sync_browser_cookies(browser: str = "chrome", target_path: Optional[Path] = None) -> Tuple[bool, str]:
+    """Extracts YouTube/Google cookies from browser into cookies.txt."""
+    if target_path is None:
+        target_path = Path(__file__).resolve().parent / "cookies.txt"
+    try:
+        import yt_dlp
+        ydl_opts = {
+            "cookiesfrombrowser": (browser, None, None, None),
+            "cookiefile": str(target_path),
+            "quiet": True,
+            "no_warnings": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            pass
+        if target_path.exists() and target_path.stat().st_size > 100:
+            return True, f"Successfully synced cookies from {browser} ({target_path.stat().st_size} bytes)"
+        return False, f"Failed to sync cookies from {browser}: empty cookie file generated"
+    except Exception as e:
+        return False, str(e)
+
+
 class YouTubeDownloader:
-    """Downloads YouTube videos locally using yt-dlp."""
+    """Downloads YouTube videos locally using yt-dlp with authentication, bot-bypass and session cookies."""
+
+    @staticmethod
+    def _build_ydl_opts(
+        extra_opts: Optional[Dict[str, Any]] = None,
+        use_cookies: bool = True,
+        clients: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        email = os.getenv("YOUTUBE_EMAIL", "manhwadesistyle@gmail.com")
+        password = os.getenv("YOUTUBE_PASSWORD", "G00gle@123")
+
+        if clients is None:
+            clients = ["visionos", "android", "ios", "mweb", "web"]
+
+        opts: Dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "remote_components": ["ejs:github"],
+            "extractor_args": {
+                "youtube": {
+                    "player_client": clients
+                }
+            },
+        }
+
+        if email:
+            opts["username"] = email
+        if password:
+            opts["password"] = password
+
+        if use_cookies:
+            cookie_file = find_cookies_file()
+            if cookie_file:
+                opts["cookiefile"] = str(cookie_file)
+
+        if extra_opts:
+            opts.update(extra_opts)
+        return opts
 
     @staticmethod
     def download(
@@ -143,7 +217,7 @@ class YouTubeDownloader:
         output_dir: Path,
         progress_callback: Optional[Callable[[float, str], None]] = None
     ) -> Path:
-        """Downloads the best MP4 video stream from a YouTube URL."""
+        """Downloads the best MP4 video stream from a YouTube URL with authentication fallback."""
         try:
             import yt_dlp
         except ImportError:
@@ -160,96 +234,130 @@ class YouTubeDownloader:
                 pct = min(downloaded / total, 1.0)
                 progress_callback(pct * 0.1, f"Downloading YouTube: {int(pct * 100)}%")
 
-        ydl_opts = {
+        base_opts = {
             "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "outtmpl": outtmpl,
             "merge_output_format": "mp4",
             "progress_hooks": [ydl_hook],
             "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "ios", "web", "mweb"]
-                }
-            },
         }
+
+        # Attempt 1: Standard download with available cookies and multi-client fallback
+        ydl_opts = YouTubeDownloader._build_ydl_opts(base_opts, use_cookies=True)
+        last_error = None
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 video_id = info.get("id", "youtube_video")
                 expected_mp4 = output_dir / f"{video_id}.mp4"
-                if expected_mp4.exists():
+                if expected_mp4.exists() and expected_mp4.stat().st_size > 0:
                     logger.info(f"YouTube video downloaded successfully: {expected_mp4}")
                     return expected_mp4
 
                 candidates = list(output_dir.glob(f"{video_id}*.mp4"))
                 if candidates:
                     return candidates[0]
-
-                raise FileNotFoundError(f"Downloaded YouTube video not found in {output_dir}")
         except Exception as e:
-            err_msg = str(e)
-            if "This video is unavailable" in err_msg or "Video unavailable" in err_msg:
-                raise RuntimeError(
-                    f"YouTube video is unavailable ({url}). The video may have been deleted, made private, or the link has a typo. Please check the URL or upload the video file directly."
-                ) from e
-            elif "Sign in to confirm" in err_msg:
-                raise RuntimeError(
-                    f"YouTube requires sign-in or bot verification for this video ({url}). Try uploading the MP4 file directly via the 'Upload File' tab."
-                ) from e
-            raise RuntimeError(f"YouTube download failed: {err_msg}") from e
+            last_error = e
+            err_str = str(e).lower()
+            logger.warning(f"Initial YouTube download attempt failed: {e}. Checking authentication fallback...")
+
+            # If blocked by signin, bot verification, format error, or reload requirement:
+            if any(k in err_str for k in ["sign in", "bot", "reload", "confirm", "format", "private"]):
+                # Attempt to refresh cookies from Chrome browser
+                sync_ok, sync_msg = sync_browser_cookies("chrome")
+                if sync_ok:
+                    logger.info(f"Refreshed Chrome cookies: {sync_msg}. Retrying download...")
+                
+                # Retry with authenticated web client and challenge solver
+                retry_opts = YouTubeDownloader._build_ydl_opts(
+                    base_opts,
+                    use_cookies=True,
+                    clients=["web", "mweb", "visionos"]
+                )
+                try:
+                    with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        video_id = info.get("id", "youtube_video")
+                        expected_mp4 = output_dir / f"{video_id}.mp4"
+                        if expected_mp4.exists() and expected_mp4.stat().st_size > 0:
+                            logger.info(f"YouTube video downloaded on auth retry: {expected_mp4}")
+                            return expected_mp4
+                        candidates = list(output_dir.glob(f"{video_id}*.mp4"))
+                        if candidates:
+                            return candidates[0]
+                except Exception as retry_e:
+                    last_error = retry_e
+
+        # If both attempts failed, provide clear user-friendly explanation
+        err_msg = str(last_error) if last_error else "Unknown download error"
+        email = os.getenv("YOUTUBE_EMAIL", "manhwadesistyle@gmail.com")
+        if "unavailable" in err_msg.lower():
+            raise RuntimeError(
+                f"YouTube video is unavailable ({url}). The video may have been deleted, made private, or the link has a typo."
+            ) from last_error
+        elif "sign in" in err_msg.lower() or "bot" in err_msg.lower():
+            raise RuntimeError(
+                f"YouTube requires sign-in verification for this video ({url}). Used account: {email}. "
+                f"Please ensure you are logged into YouTube in Chrome or upload the MP4 file directly via the 'Upload File' tab."
+            ) from last_error
+        raise RuntimeError(f"YouTube download failed: {err_msg}") from last_error
 
     @staticmethod
     def get_video_info(url: str) -> Dict[str, Any]:
-        """Fetches YouTube video metadata (title, duration, thumbnail) without downloading."""
+        """Fetches YouTube video metadata (title, duration, thumbnail) with authentication fallback."""
         try:
             import yt_dlp
         except ImportError:
             raise RuntimeError("`yt-dlp` is required. Run `pip install yt-dlp`.")
 
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "ios", "web", "mweb"]
-                }
-            },
-        }
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                duration_sec = info.get("duration", 0) or 0
-                
-                # Format seconds into HH:MM:SS or MM:SS
-                hours = int(duration_sec // 3600)
-                mins = int((duration_sec % 3600) // 60)
-                secs = int(duration_sec % 60)
-                if hours > 0:
-                    duration_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
-                else:
-                    duration_str = f"{mins:02d}:{secs:02d}"
+        last_error = None
+        for attempt, clients in enumerate([
+            ["visionos", "android", "ios", "mweb", "web"],
+            ["web", "mweb", "visionos"]
+        ]):
+            ydl_opts = YouTubeDownloader._build_ydl_opts(
+                {"skip_download": True},
+                use_cookies=True,
+                clients=clients
+            )
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    duration_sec = info.get("duration", 0) or 0
+                    
+                    hours = int(duration_sec // 3600)
+                    mins = int((duration_sec % 3600) // 60)
+                    secs = int(duration_sec % 60)
+                    duration_str = f"{hours:02d}:{mins:02d}:{secs:02d}" if hours > 0 else f"{mins:02d}:{secs:02d}"
 
-                return {
-                    "id": info.get("id", ""),
-                    "title": info.get("title", "Untitled Video"),
-                    "duration_seconds": duration_sec,
-                    "duration_formatted": duration_str,
-                    "duration_minutes": round(duration_sec / 60.0, 1),
-                    "thumbnail": info.get("thumbnail") or (info.get("thumbnails")[-1]["url"] if info.get("thumbnails") else ""),
-                    "channel": info.get("uploader") or info.get("channel", "Unknown Channel"),
-                    "view_count": info.get("view_count", 0),
-                }
-        except Exception as e:
-            err_msg = str(e)
-            if "This video is unavailable" in err_msg or "Video unavailable" in err_msg:
-                raise ValueError("YouTube video is unavailable. It may have been deleted, made private, or the URL contains a typo.") from e
-            elif "Sign in to confirm" in err_msg:
-                raise ValueError("YouTube requires sign-in for this video. Please upload the file directly.") from e
-            raise ValueError(f"Unable to access video: {err_msg}") from e
+                    return {
+                        "id": info.get("id", ""),
+                        "title": info.get("title", "Untitled Video"),
+                        "duration_seconds": duration_sec,
+                        "duration_formatted": duration_str,
+                        "duration_minutes": round(duration_sec / 60.0, 1),
+                        "thumbnail": info.get("thumbnail") or (info.get("thumbnails")[-1]["url"] if info.get("thumbnails") else ""),
+                        "channel": info.get("uploader") or info.get("channel", "Unknown Channel"),
+                        "view_count": info.get("view_count", 0),
+                    }
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                if attempt == 0 and any(k in err_str for k in ["sign in", "bot", "reload", "confirm", "format"]):
+                    sync_browser_cookies("chrome")
+                    continue
+                break
+
+        err_msg = str(last_error) if last_error else "Unknown error"
+        email = os.getenv("YOUTUBE_EMAIL", "manhwadesistyle@gmail.com")
+        if "unavailable" in err_msg.lower():
+            raise ValueError("YouTube video is unavailable. It may have been deleted, made private, or the URL contains a typo.") from last_error
+        elif "sign in" in err_msg.lower() or "bot" in err_msg.lower():
+            raise ValueError(f"YouTube requires sign-in for this video. Attempted login with {email}. If issues persist, upload the file directly.") from last_error
+        raise ValueError(f"Unable to access video: {err_msg}") from last_error
+
 
 
 # ============================================================================

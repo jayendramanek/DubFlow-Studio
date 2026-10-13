@@ -38,6 +38,8 @@ from pipeline import (
     HardwareAccelerationManager,
     AppleSiliconManager,
     YouTubeDownloader,
+    find_cookies_file,
+    sync_browser_cookies,
     AudioDemixer,
     TimedTranscriber,
     SegmentTranslator,
@@ -790,6 +792,108 @@ def get_video_info_get(url: str):
     except Exception as e:
         logger.error(f"Failed to fetch video info: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class YouTubeCredentialsRequest(BaseModel):
+    email: str
+    password: str
+
+
+class YouTubeSyncRequest(BaseModel):
+    browser: Optional[str] = "chrome"
+
+
+class YouTubePasteCookiesRequest(BaseModel):
+    cookies_text: str
+
+
+@app.get("/api/youtube/auth-status", tags=["YouTube Auth"])
+def get_youtube_auth_status():
+    """Returns current YouTube authentication, account credentials, and cookies status."""
+    email = os.getenv("YOUTUBE_EMAIL", "manhwadesistyle@gmail.com")
+    cookie_file = find_cookies_file()
+    has_cookies = cookie_file is not None and cookie_file.exists() and cookie_file.stat().st_size > 100
+    cookie_count = 0
+    if has_cookies and cookie_file:
+        try:
+            with open(cookie_file, "r") as f:
+                cookie_count = sum(1 for line in f if not line.startswith("#") and line.strip())
+        except Exception:
+            pass
+
+    return {
+        "email": email,
+        "has_password": bool(os.getenv("YOUTUBE_PASSWORD", "G00gle@123")),
+        "has_cookies": has_cookies,
+        "cookie_count": cookie_count,
+        "cookie_file": str(cookie_file) if cookie_file else None,
+        "status": "ready" if has_cookies else "unauthenticated",
+    }
+
+
+@app.post("/api/youtube/sync-cookies", tags=["YouTube Auth"])
+def post_sync_youtube_cookies(req: Optional[YouTubeSyncRequest] = None):
+    """Syncs YouTube/Google cookies directly from local browser (Chrome) into cookies.txt."""
+    browser = req.browser if req and req.browser else "chrome"
+    success, message = sync_browser_cookies(browser=browser)
+    return {
+        "success": success,
+        "message": message,
+        "auth_status": get_youtube_auth_status()
+    }
+
+
+@app.post("/api/youtube/update-credentials", tags=["YouTube Auth"])
+def post_update_youtube_credentials(req: YouTubeCredentialsRequest):
+    """Updates YouTube login email and password in environment and .env file."""
+    os.environ["YOUTUBE_EMAIL"] = req.email.strip()
+    os.environ["YOUTUBE_PASSWORD"] = req.password.strip()
+
+    env_path = BASE_DIR / ".env"
+    try:
+        content = env_path.read_text() if env_path.exists() else ""
+        lines = content.splitlines()
+        new_lines = []
+        found_email = False
+        found_pwd = False
+        for line in lines:
+            if line.startswith("YOUTUBE_EMAIL="):
+                new_lines.append(f"YOUTUBE_EMAIL={req.email.strip()}")
+                found_email = True
+            elif line.startswith("YOUTUBE_PASSWORD="):
+                new_lines.append(f"YOUTUBE_PASSWORD={req.password.strip()}")
+                found_pwd = True
+            else:
+                new_lines.append(line)
+        if not found_email:
+            new_lines.append(f"YOUTUBE_EMAIL={req.email.strip()}")
+        if not found_pwd:
+            new_lines.append(f"YOUTUBE_PASSWORD={req.password.strip()}")
+        env_path.write_text("\n".join(new_lines) + "\n")
+    except Exception as e:
+        logger.warning(f"Could not persist credentials to .env: {e}")
+
+    return {
+        "success": True,
+        "message": f"Updated YouTube credentials for {req.email.strip()}",
+        "auth_status": get_youtube_auth_status()
+    }
+
+
+@app.post("/api/youtube/paste-cookies", tags=["YouTube Auth"])
+def post_paste_youtube_cookies(req: YouTubePasteCookiesRequest):
+    """Saves pasted Netscape cookies.txt directly to project root."""
+    target_path = BASE_DIR / "cookies.txt"
+    try:
+        target_path.write_text(req.cookies_text.strip() + "\n")
+        return {
+            "success": True,
+            "message": f"Successfully saved {len(req.cookies_text)} characters to cookies.txt",
+            "auth_status": get_youtube_auth_status()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write cookies.txt: {e}")
+
 
 
 @app.post("/api/dub", response_model=DubbingJobResponse, status_code=status.HTTP_202_ACCEPTED, tags=["Dubbing"])

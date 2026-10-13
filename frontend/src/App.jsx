@@ -556,6 +556,8 @@ export default function App() {
 
   // Modals
   const [isAddVideoModalOpen, setIsAddVideoModalOpen] = useState(false);
+  const [ytAuthStatus, setYtAuthStatus] = useState(null);
+  const [isSyncingYtCookies, setIsSyncingYtCookies] = useState(false);
 
   // YTD state: channels, stats, selected channel, modals
   const [ytdChannels, setYtdChannels] = useState([]);
@@ -565,6 +567,36 @@ export default function App() {
   const [isAddChannelModalOpen, setIsAddChannelModalOpen] = useState(false);
   const [editingChannel, setEditingChannel] = useState(null);
   const [downloadModalVideo, setDownloadModalVideo] = useState(null);
+
+  const fetchYtAuthStatus = async () => {
+    try {
+      const res = await fetch("/api/youtube/auth-status");
+      if (res.ok) {
+        const data = await res.json();
+        setYtAuthStatus(data);
+      }
+    } catch (e) {
+      console.error("YouTube auth fetch error:", e);
+    }
+  };
+
+  const handleSyncYtCookies = async () => {
+    setIsSyncingYtCookies(true);
+    try {
+      const res = await fetch("/api/youtube/sync-cookies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ browser: "chrome" })
+      });
+      const data = await res.json();
+      if (data.auth_status) setYtAuthStatus(data.auth_status);
+      alert(data.message || "Cookies synced successfully!");
+    } catch (e) {
+      alert("Error syncing cookies: " + e.message);
+    } finally {
+      setIsSyncingYtCookies(false);
+    }
+  };
 
   const fetchStats = async () => {
     try {
@@ -620,6 +652,7 @@ export default function App() {
       fetchVideos();
       fetchYtdChannels();
       fetchYtdStats();
+      fetchYtAuthStatus();
       const isBusy = (systemStats?.counts?.active_jobs > 0) || (systemStats?.queue_summary?.total_pending > 0);
       const intervalMs = isBusy ? 3000 : 8000;
       const interval = setInterval(() => {
@@ -1840,7 +1873,45 @@ export default function App() {
       {isAddVideoModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
           <div className="glass-card rounded-2xl p-6 w-full max-w-lg border border-white/10 shadow-2xl">
-            <h3 className="text-lg font-bold text-white mb-4">Add New Video Project</h3>
+            <h3 className="text-lg font-bold text-white mb-2">Add New Video Project</h3>
+
+            {/* YouTube Account & Cookie Auth Badge */}
+            <div className="flex items-center justify-between p-3 rounded-xl bg-surface-900 border border-slate-700/80 mb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-red-600/20 text-red-400 flex items-center justify-center font-bold text-xs border border-red-500/20">
+                  YT
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                    <span>{ytAuthStatus?.email || "manhwadesistyle@gmail.com"}</span>
+                    {ytAuthStatus?.has_cookies ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30 flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                        <span>Logged In ({ytAuthStatus?.cookie_count || 511} cookies)</span>
+                      </span>
+                    ) : (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30">
+                        Cookie Sync Needed
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    Authenticates YouTube downloads to prevent bot & sign-in blocks
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleSyncYtCookies}
+                disabled={isSyncingYtCookies}
+                className="px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-200 border border-white/5 text-xs font-semibold transition flex items-center gap-1 flex-shrink-0"
+                title="Sync latest YouTube session cookies from Chrome"
+              >
+                <span>{isSyncingYtCookies ? "Syncing..." : "🔄 Re-sync"}</span>
+              </button>
+            </div>
+
             <form
               onSubmit={async (e) => {
                 e.preventDefault();

@@ -3089,10 +3089,39 @@
       const [durationSeconds, setDurationSeconds] = useState(null);
       const [isFetchingInfo, setIsFetchingInfo] = useState(false);
       const [isSaving, setIsSaving] = useState(false);
+      const [authStatus, setAuthStatus] = useState(null);
+      const [isSyncingCookies, setIsSyncingCookies] = useState(false);
+      const [fetchError, setFetchError] = useState("");
+
+      useEffect(() => {
+        fetch("/api/youtube/auth-status")
+          .then(res => res.json())
+          .then(data => setAuthStatus(data))
+          .catch(() => {});
+      }, []);
+
+      const handleSyncCookies = async () => {
+        setIsSyncingCookies(true);
+        try {
+          const res = await fetch("/api/youtube/sync-cookies", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ browser: "chrome" })
+          });
+          const data = await res.json();
+          if (data.auth_status) setAuthStatus(data.auth_status);
+          alert(data.message || "Cookies synced successfully!");
+        } catch (e) {
+          alert("Error syncing cookies: " + e.message);
+        } finally {
+          setIsSyncingCookies(false);
+        }
+      };
 
       const handleFetchInfo = async () => {
         if (!youtubeUrl.trim()) return;
         setIsFetchingInfo(true);
+        setFetchError("");
         try {
           const res = await fetch("/api/video-info", {
             method: "POST",
@@ -3103,9 +3132,13 @@
             const data = await res.json();
             if (data.title && !title) setTitle(data.title);
             if (data.duration_seconds) setDurationSeconds(data.duration_seconds);
+          } else {
+            const err = await res.json();
+            setFetchError(err.detail || "Failed to fetch video details from YouTube");
           }
         } catch (e) {
           console.error("Failed to fetch info:", e);
+          setFetchError(e.message || "Network error fetching video info");
         } finally {
           setIsFetchingInfo(false);
         }
@@ -3143,9 +3176,62 @@
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
           <div className="glass-card rounded-2xl p-6 w-full max-w-lg border border-white/10 shadow-2xl">
             <h3 className="text-lg font-bold text-white mb-1">Add New Video Project</h3>
-            <p className="text-xs text-slate-400 mb-6">
+            <p className="text-xs text-slate-400 mb-4">
               Create a new entry with title and YouTube link to organize multi-part or single dubs
             </p>
+
+            {/* YouTube Account & Cookie Auth Badge */}
+            <div className="flex items-center justify-between p-3 rounded-xl bg-surface-900 border border-slate-700/80 mb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-red-600/20 text-red-400 flex items-center justify-center font-bold text-xs border border-red-500/20">
+                  YT
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                    <span>{authStatus?.email || "manhwadesistyle@gmail.com"}</span>
+                    {authStatus?.has_cookies ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30 flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                        <span>Logged In ({authStatus?.cookie_count || 511} cookies)</span>
+                      </span>
+                    ) : (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30">
+                        Cookie Sync Needed
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    Authenticates YouTube downloads to prevent bot & sign-in blocks
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleSyncCookies}
+                disabled={isSyncingCookies}
+                className="px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-200 border border-white/5 text-xs font-semibold transition flex items-center gap-1 flex-shrink-0"
+                title="Sync latest YouTube session cookies from Chrome"
+              >
+                <span>{isSyncingCookies ? "Syncing..." : "🔄 Re-sync"}</span>
+              </button>
+            </div>
+
+            {fetchError && (
+              <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-300 mb-4 flex items-start justify-between gap-2">
+                <div>
+                  <strong className="block text-red-200">YouTube Warning:</strong>
+                  <span>{fetchError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSyncCookies}
+                  className="px-2 py-1 rounded bg-red-600/30 hover:bg-red-600/50 text-[11px] text-white border border-red-500/30 whitespace-nowrap"
+                >
+                  Sync Cookies
+                </button>
+              </div>
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>

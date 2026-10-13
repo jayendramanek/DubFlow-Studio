@@ -147,6 +147,28 @@ def normalize_channel_url(input_url: str) -> str:
     return f"https://www.youtube.com{pathname}"
 
 
+def get_ytdlp_auth_args() -> List[str]:
+    """Builds authentication, cookie, and challenge-solver CLI arguments for yt-dlp."""
+    args = []
+    try:
+        from pipeline import find_cookies_file
+        cookie_path = find_cookies_file()
+        if cookie_path:
+            args.extend(["--cookies", str(cookie_path)])
+    except Exception:
+        pass
+
+    args.extend(["--remote-components", "ejs:github"])
+    email = os.getenv("YOUTUBE_EMAIL", "manhwadesistyle@gmail.com")
+    password = os.getenv("YOUTUBE_PASSWORD", "G00gle@123")
+    if email:
+        args.extend(["--username", email])
+    if password:
+        args.extend(["--password", password])
+    args.extend(["--extractor-args", "youtube:player_client=visionos,android,ios,mweb,web"])
+    return args
+
+
 def fetch_channel_data_from_yt(normalized_url: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Uses yt-dlp flat-playlist mode to fetch channel metadata and video list.
@@ -157,6 +179,7 @@ def fetch_channel_data_from_yt(normalized_url: str) -> Tuple[Dict[str, Any], Lis
         "-J",
         "--ignore-config",
         "--socket-timeout", "40",
+    ] + get_ytdlp_auth_args() + [
         "--",
         normalized_url
     ]
@@ -788,6 +811,7 @@ def process_video_download_task(
             "--socket-timeout", "30",
             "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
             "--merge-output-format", "mp4",
+        ] + get_ytdlp_auth_args() + [
             "-o", str(raw_mp4_path),
             "--",
             yt_url
