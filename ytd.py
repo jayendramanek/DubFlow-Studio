@@ -165,7 +165,7 @@ def get_ytdlp_auth_args() -> List[str]:
         pass
 
     args.extend(["--remote-components", "ejs:github"])
-    args.extend(["--js-runtimes", "deno,node,quickjs"])
+    args.extend(["--js-runtimes", "node", "--js-runtimes", "deno", "--js-runtimes", "quickjs"])
     email = os.getenv("YOUTUBE_EMAIL", "manhwadesistyle@gmail.com")
     password = os.getenv("YOUTUBE_PASSWORD", "G00gle@123")
     if email:

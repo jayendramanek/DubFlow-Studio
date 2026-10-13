@@ -11,13 +11,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOST=0.0.0.0 \
     PORT=8000
 
-# Install system dependencies (FFmpeg, libsndfile for audio processing, curl for healthchecks)
+# Install system dependencies (FFmpeg, libsndfile for audio processing, curl, Node.js 22 LTS for yt-dlp challenges)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
     curl \
     ca-certificates \
     build-essential \
+    gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -44,7 +47,7 @@ EXPOSE 8000
 
 # Container healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:${PORT:-3333}/api/health || curl -f http://localhost:8000/api/health || exit 1
 
 # Start DubFlow Studio via Uvicorn / api.py
 CMD ["python", "api.py"]

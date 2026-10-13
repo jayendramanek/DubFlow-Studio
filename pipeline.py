@@ -153,6 +153,12 @@ def find_cookies_file() -> Optional[Path]:
             if len(decoded) > 100:
                 target = Path(__file__).resolve().parent / "cookies.txt"
                 target.write_text(decoded)
+                try:
+                    ws_target = Path(__file__).resolve().parent / "workspace_api" / "cookies.txt"
+                    ws_target.parent.mkdir(parents=True, exist_ok=True)
+                    ws_target.write_text(decoded)
+                except Exception:
+                    pass
                 return target
         except Exception as e:
             logger.warning(f"Could not load cookies from YOUTUBE_COOKIES_B64: {e}")
@@ -162,6 +168,12 @@ def find_cookies_file() -> Optional[Path]:
         try:
             target = Path(__file__).resolve().parent / "cookies.txt"
             target.write_text(raw_env)
+            try:
+                ws_target = Path(__file__).resolve().parent / "workspace_api" / "cookies.txt"
+                ws_target.parent.mkdir(parents=True, exist_ok=True)
+                ws_target.write_text(raw_env)
+            except Exception:
+                pass
             return target
         except Exception as e:
             logger.warning(f"Could not load cookies from YOUTUBE_COOKIES: {e}")
@@ -244,7 +256,7 @@ class YouTubeDownloader:
             "quiet": True,
             "no_warnings": True,
             "remote_components": ["ejs:github"],
-            "js_runtimes": {"deno": None, "node": None, "quickjs": None},
+            "js_runtimes": {"node": {}, "deno": {}, "quickjs": {}},
             "extractor_args": {
                 "youtube": {
                     "player_client": clients
