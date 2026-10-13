@@ -62,24 +62,27 @@ def get_system_ram() -> Dict[str, Any]:
 
     # 3. macOS (Apple Silicon or Intel Mac)
     try:
+        import re
         total_bytes = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip())
         vm_output = subprocess.check_output(["vm_stat"]).decode("utf-8")
-        page_size = 4096
+        m_page = re.search(r"page size of (\d+) bytes", vm_output)
+        page_size = int(m_page.group(1)) if m_page else 4096
         pages = {}
         for line in vm_output.splitlines():
             if ":" in line:
                 parts = line.split(":")
-                key = parts[0].strip()
+                key = parts[0].strip().strip("\"")
                 val = parts[1].strip().rstrip(".")
                 if val.isdigit():
                     pages[key] = int(val)
-        free_pages = pages.get("Pages free", 0) + pages.get("Pages speculative", 0)
-        free_bytes = free_pages * page_size
-        used_bytes = max(0, total_bytes - free_bytes)
+        # On macOS, available memory = free + inactive + purgeable + speculative
+        avail_pages = pages.get("Pages free", 0) + pages.get("Pages inactive", 0) + pages.get("Pages purgeable", 0) + pages.get("Pages speculative", 0)
+        avail_bytes = avail_pages * page_size
+        used_bytes = max(0, total_bytes - avail_bytes)
         return {
             "total_gb": round(total_bytes / (1024 ** 3), 2),
             "used_gb": round(used_bytes / (1024 ** 3), 2),
-            "free_gb": round(free_bytes / (1024 ** 3), 2),
+            "free_gb": round(avail_bytes / (1024 ** 3), 2),
             "percent": round((used_bytes / total_bytes) * 100, 1)
         }
     except Exception:
@@ -112,7 +115,8 @@ def load_databases(jobs_dir: Path, workspace_dir: Path) -> Tuple[Dict[str, Any],
         except Exception:
             jobs_db = {}
 
-    if videos_file.exists():
+    has_videos_file = videos_file.exists()
+    if has_videos_file:
         try:
             with open(videos_file, "r", encoding="utf-8") as f:
                 videos_db = json.load(f)
@@ -196,7 +200,7 @@ def load_databases(jobs_dir: Path, workspace_dir: Path) -> Tuple[Dict[str, Any],
                 jobs_db[job_id] = job_rec
 
     # Organize existing jobs into video entries if not already grouped
-    if not videos_db:
+    if not videos_db and not has_videos_file:
         # Group jobs by video_base_id
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for j_id, j_data in jobs_db.items():
@@ -279,33 +283,89 @@ def save_databases(workspace_dir: Path, jobs_db: Dict[str, Any], videos_db: Dict
         print(f"Error saving databases: {e}")
 
 
+def format_duration_human(sec: float) -> str:
+    """Formats seconds into human-readable duration like '4m 30s', '45s', or '1h 12m'."""
+    sec = int(round(sec))
+    if sec <= 0:
+        return "0s"
+    if sec < 60:
+        return f"{sec}s"
+    m = sec // 60
+    s = sec % 60
+    if m < 60:
+        return f"{m}m {s}s" if s > 0 else f"{m}m"
+    h = m // 60
+    rem_m = m % 60
+    return f"{h}h {rem_m}m" if rem_m > 0 else f"{h}h"
+
+
+def estimate_job_duration_sec(job_dict: Dict[str, Any]) -> float:
+    """
+    Estimates total processing time for a dubbing job based on video/part duration.
+    Full dubbing pipeline (Whisper STT + Translation + Edge-TTS/XTTS + FFMPEG Remux)
+    takes ~0.35x real-time duration on modern CPU / Apple Silicon.
+    """
+    dur = job_dict.get("duration") or job_dict.get("duration_seconds")
+    try:
+        video_sec = float(dur) if dur is not None else 600.0
+    except (ValueError, TypeError):
+        video_sec = 600.0
+
+    if video_sec <= 0:
+        video_sec = 600.0
+
+    # Account for multi-language TTS generation
+    langs = job_dict.get("target_langs") or [job_dict.get("target_lang", "es")]
+    num_langs = max(1, len(langs))
+    lang_mult = 1.0 + (num_langs - 1) * 0.15
+
+    # Voice clone (XTTS) is slightly heavier than Edge-TTS
+    clone_mult = 1.35 if job_dict.get("voice_clone") else 1.0
+
+    return max(45.0, video_sec * 0.35 * lang_mult * clone_mult)
+
+
 def get_system_stats(jobs_db: Dict[str, Any], videos_db: Dict[str, Any]) -> Dict[str, Any]:
     """Calculates live system RAM and statistics for dashboard widgets."""
     ram = get_system_ram()
-
+    now = time.time()
     total_videos = len(videos_db)
-    
-    # Calculate completed conversions count and language counts
+
     language_counts: Dict[str, int] = {}
     completed_jobs = 0
-    active_jobs = 0
     failed_jobs = 0
-    active_jobs_list: List[Dict[str, Any]] = []
+
+    processing_jobs: List[Dict[str, Any]] = []
+    queued_jobs: List[Dict[str, Any]] = []
 
     for j in jobs_db.values():
         st = j.get("status")
         if st in ["queued", "processing"]:
-            active_jobs += 1
-            active_jobs_list.append({
+            vid_id = j.get("video_id")
+            vid_title = None
+            if vid_id and vid_id in videos_db:
+                vid_title = videos_db[vid_id].get("title")
+
+            job_info = {
                 "job_id": j.get("job_id"),
+                "video_id": vid_id,
+                "video_title": vid_title,
                 "status": st,
                 "progress": j.get("progress", 0.0),
-                "current_step": j.get("current_step", "Processing..."),
+                "current_step": j.get("current_step", "In queue..."),
                 "target_langs": j.get("target_langs") or [j.get("target_lang", "es")],
                 "part_name": j.get("part_name"),
                 "created_at": j.get("created_at"),
-                "youtube_url": j.get("youtube_url")
-            })
+                "started_at": j.get("started_at"),
+                "youtube_url": j.get("youtube_url"),
+                "duration": j.get("duration") or j.get("duration_seconds")
+            }
+
+            if st == "processing":
+                processing_jobs.append(job_info)
+            else:
+                queued_jobs.append(job_info)
+
         elif st == "completed":
             completed_jobs += 1
             langs = j.get("target_langs") or [j.get("target_lang", "de")]
@@ -313,6 +373,57 @@ def get_system_stats(jobs_db: Dict[str, Any], videos_db: Dict[str, Any]) -> Dict
                 language_counts[l] = language_counts.get(l, 0) + 1
         elif st == "failed":
             failed_jobs += 1
+
+    # Sort processing and queued jobs chronologically
+    processing_jobs.sort(key=lambda x: x.get("started_at") or x.get("created_at") or 0)
+    queued_jobs.sort(key=lambda x: x.get("created_at") or 0)
+
+    # Calculate remaining time for processing jobs
+    proc_rem_seconds: List[float] = []
+    for pj in processing_jobs:
+        prog = float(pj.get("progress") or 0.0)
+        started = pj.get("started_at") or pj.get("created_at") or now
+        elapsed = max(0.0, now - started)
+        est_total = estimate_job_duration_sec(pj)
+
+        if prog > 0.05 and elapsed > 5:
+            rem = max(10.0, (elapsed / prog) * (1.0 - prog))
+        else:
+            rem = max(15.0, est_total * (1.0 - prog))
+
+        pj["estimated_remaining_seconds"] = round(rem)
+        pj["estimated_remaining_formatted"] = format_duration_human(rem)
+        proc_rem_seconds.append(rem)
+
+    # Calculate estimated duration for queued jobs
+    queued_durations: List[float] = []
+    for qj in queued_jobs:
+        q_dur = estimate_job_duration_sec(qj)
+        qj["estimated_duration_seconds"] = round(q_dur)
+        qj["estimated_duration_formatted"] = format_duration_human(q_dur)
+        queued_durations.append(q_dur)
+
+    # Concurrency in ThreadPoolExecutor is 2
+    concurrency = 2
+    proc_work = sum(proc_rem_seconds)
+    queued_work = sum(queued_durations)
+    total_work = proc_work + queued_work
+    total_est_seconds = round(total_work / concurrency) if total_work > 0 else 0
+
+    queue_summary = {
+        "total_in_queue": len(queued_jobs),
+        "total_processing": len(processing_jobs),
+        "total_pending": len(queued_jobs) + len(processing_jobs),
+        "estimated_seconds_remaining": total_est_seconds,
+        "estimated_time_formatted": format_duration_human(total_est_seconds),
+        "estimated_finish_time": round(now + total_est_seconds) if total_est_seconds > 0 else None,
+        "concurrency": concurrency,
+        "processing_jobs": processing_jobs,
+        "queued_jobs": queued_jobs
+    }
+
+    # Combined active list for backward compatibility
+    active_jobs_list = processing_jobs + queued_jobs
 
     # Ensure all video languages are properly represented
     for v in videos_db.values():
@@ -340,11 +451,15 @@ def get_system_stats(jobs_db: Dict[str, Any], videos_db: Dict[str, Any]) -> Dict
         "counts": {
             "total_videos": total_videos,
             "total_conversions": completed_jobs,
-            "active_jobs": active_jobs,
+            "active_jobs": len(active_jobs_list),
+            "queued_jobs": len(queued_jobs),
+            "processing_jobs": len(processing_jobs),
             "completed_jobs": completed_jobs,
             "failed_jobs": failed_jobs,
-            "total_languages": len(language_counts)
+            "total_languages": len(language_counts),
+            "estimated_queue_time": format_duration_human(total_est_seconds)
         },
+        "queue_summary": queue_summary,
         "languages": language_counts,
         "active_jobs": active_jobs_list
     }

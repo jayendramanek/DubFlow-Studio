@@ -390,6 +390,16 @@
         <svg className="w-4 h-4 mr-1 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
         </svg>
+      ),
+      Stop: () => (
+        <svg className="w-3.5 h-3.5 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <rect x="6" y="6" width="12" height="12" rx="2" strokeWidth="2" stroke="currentColor" fill="currentColor" />
+        </svg>
+      ),
+      Close: () => (
+        <svg className="w-3.5 h-3.5 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+        </svg>
       )
     };
 
@@ -813,13 +823,15 @@
           fetchVideos();
           fetchYtdChannels();
           fetchYtdStats();
+          const isBusy = (systemStats?.counts?.active_jobs > 0) || (systemStats?.queue_summary?.total_pending > 0);
+          const intervalMs = isBusy ? 3000 : 8000;
           const timer = setInterval(() => {
             fetchStats();
             fetchYtdStats();
-          }, 8000);
+          }, intervalMs);
           return () => clearInterval(timer);
         }
-      }, [isAuthenticated]);
+      }, [isAuthenticated, systemStats?.counts?.active_jobs, systemStats?.queue_summary?.total_pending]);
 
       const handleLogout = () => {
         localStorage.removeItem("admin_auth");
@@ -853,6 +865,43 @@
           } catch (err) {
             alert("Error deleting video: " + err.message);
           }
+        }
+      };
+
+      const handleCancelJob = async (jobId, label) => {
+        const name = label || jobId;
+        if (!window.confirm(`Are you sure you want to stop/cancel "${name}"?`)) {
+          return;
+        }
+        try {
+          const res = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+          if (res.ok) {
+            fetchStats();
+            fetchVideos();
+          } else {
+            const err = await res.json().catch(() => ({}));
+            alert("Failed to cancel job: " + (err.detail || "Server error"));
+          }
+        } catch (err) {
+          alert("Error cancelling job: " + err.message);
+        }
+      };
+
+      const handleCancelAllQueue = async () => {
+        if (!window.confirm("Are you sure you want to cancel all currently queued and running conversions?")) {
+          return;
+        }
+        try {
+          const res = await fetch("/api/queue/cancel-all", { method: "POST" });
+          if (res.ok) {
+            fetchStats();
+            fetchVideos();
+          } else {
+            const err = await res.json().catch(() => ({}));
+            alert("Failed to cancel queue: " + (err.detail || "Server error"));
+          }
+        } catch (err) {
+          alert("Error cancelling queue: " + err.message);
         }
       };
 
@@ -1086,6 +1135,8 @@
                   onAddVideo={() => setIsAddVideoModalOpen(true)}
                   videosList={videosList}
                   onDeleteVideo={handleDeleteVideoProject}
+                  onCancelJob={handleCancelJob}
+                  onCancelAllQueue={handleCancelAllQueue}
                 />
               )}
 
@@ -1107,6 +1158,7 @@
                   onBack={() => { setActiveTab("videos"); fetchVideos(); fetchStats(); }}
                   onJobCreated={() => { fetchStats(); fetchVideos(); }}
                   onDeleteVideo={handleDeleteVideoProject}
+                  onCancelJob={handleCancelJob}
                 />
               )}
 
@@ -1204,41 +1256,105 @@
     // =========================================================================
     // Dashboard View Component
     // =========================================================================
-    function DashboardView({ stats, onRefresh, onOpenVideoDetails, onAddVideo, videosList, onDeleteVideo }) {
-      const counts = stats?.counts || { total_videos: 0, total_conversions: 0, active_jobs: 0, total_languages: 0 };
-      const activeJobs = stats?.active_jobs || [];
-      const hasActive = activeJobs.length > 0;
-      const primaryActive = hasActive ? activeJobs[0] : null;
+    function DashboardView({ stats, onRefresh, onOpenVideoDetails, onAddVideo, videosList, onDeleteVideo, onCancelJob, onCancelAllQueue }) {
+      const counts = stats?.counts || { total_videos: 0, total_conversions: 0, active_jobs: 0, queued_jobs: 0, processing_jobs: 0, total_languages: 0 };
+      const queueSummary = stats?.queue_summary || {
+        total_in_queue: counts.queued_jobs || 0,
+        total_processing: counts.processing_jobs || 0,
+        total_pending: counts.active_jobs || 0,
+        estimated_seconds_remaining: 0,
+        estimated_time_formatted: counts.estimated_queue_time || "0s",
+        estimated_finish_time: null,
+        processing_jobs: [],
+        queued_jobs: []
+      };
+
+      const processingJobs = queueSummary.processing_jobs || [];
+      const queuedJobs = queueSummary.queued_jobs || [];
+      const hasPending = queueSummary.total_pending > 0;
+      const primaryActive = processingJobs.length > 0 ? processingJobs[0] : (queuedJobs.length > 0 ? queuedJobs[0] : null);
 
       return (
         <div className="space-y-8">
-          {/* Current Running Conversion Status Card */}
+          {/* Current Running Conversion & Queue Status Card */}
           <div className="glass-card rounded-2xl p-6 border border-white/10 relative overflow-hidden">
-            {hasActive ? (
+            {hasPending && primaryActive ? (
               <div>
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                   <div className="flex items-center gap-3">
                     <span className="flex h-3 w-3 relative">
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
                       <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
                     </span>
-                    <h2 className="text-base font-bold text-white">Active Video Conversion In Progress</h2>
-                  </div>
-                  <span className="text-xs px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-bold uppercase tracking-wider">
-                    Processing
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-                  <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
-                    <div className="text-xs text-gray-400">Current Task</div>
-                    <div className="font-bold text-white text-sm truncate mt-0.5">
-                      {primaryActive.part_name || "Full Video"} (Job: {primaryActive.job_id})
+                    <div>
+                      <h2 className="text-base font-bold text-white flex items-center gap-2">
+                        <span>Active Video Conversion & Queue</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-surface-800 text-slate-300 font-mono border border-white/10">
+                          {queueSummary.total_pending} {queueSummary.total_pending === 1 ? 'Job' : 'Jobs'} Total
+                        </span>
+                      </h2>
                     </div>
                   </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {queueSummary.total_processing > 0 && (
+                      <span className="text-xs px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                        <span>{queueSummary.total_processing} Running</span>
+                      </span>
+                    )}
+                    {queueSummary.total_in_queue > 0 && (
+                      <span className="text-xs px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                        <span>⏳</span>
+                        <span>{queueSummary.total_in_queue} in Queue</span>
+                      </span>
+                    )}
+                    {queueSummary.estimated_seconds_remaining > 0 && (
+                      <span className="text-xs px-3 py-1 rounded-full bg-gradient-to-r from-brand-600/30 to-indigo-600/30 text-brand-300 border border-brand-500/30 font-bold tracking-wide flex items-center gap-1.5 shadow-sm">
+                        <span>⏱ Approx. {queueSummary.estimated_time_formatted} Remaining</span>
+                      </span>
+                    )}
+                    {primaryActive && onCancelJob && (
+                      <button
+                        type="button"
+                        onClick={() => onCancelJob(primaryActive.job_id, primaryActive.part_name || primaryActive.video_title)}
+                        className="px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white border border-red-500 text-xs font-bold transition flex items-center gap-1 shadow-sm ml-1"
+                        title="Stop this task"
+                      >
+                        <Icons.Stop />
+                        <span>Stop Task</span>
+                      </button>
+                    )}
+                    {queueSummary.total_pending > 1 && onCancelAllQueue && (
+                      <button
+                        type="button"
+                        onClick={onCancelAllQueue}
+                        className="px-2.5 py-1 rounded-lg bg-red-600/20 hover:bg-red-600/30 text-red-300 hover:text-white border border-red-500/30 text-xs font-bold transition flex items-center gap-1"
+                        title="Cancel all pending jobs in queue"
+                      >
+                        <Icons.Close />
+                        <span>Cancel All ({queueSummary.total_pending})</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                  <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
+                    <div className="text-xs text-gray-400">Current Task</div>
+                    <div className="font-bold text-white text-sm truncate mt-0.5" title={primaryActive.video_title || primaryActive.part_name || "Full Video"}>
+                      {primaryActive.part_name || "Full Video"}
+                    </div>
+                    {primaryActive.video_title && (
+                      <div className="text-[11px] text-slate-400 truncate mt-0.5" title={primaryActive.video_title}>
+                        {primaryActive.video_title}
+                      </div>
+                    )}
+                  </div>
+
                   <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
                     <div className="text-xs text-gray-400">Target Languages</div>
-                    <div className="flex items-center gap-1.5 mt-1">
+                    <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                       {(primaryActive.target_langs || []).map(l => (
                         <span key={l} className="text-xs px-2 py-0.5 rounded bg-surface-800 text-slate-200 border border-white/5 font-semibold">
                           {LANG_MAP[l]?.flag} {LANG_MAP[l]?.name || l}
@@ -1246,11 +1362,29 @@
                       ))}
                     </div>
                   </div>
+
                   <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
-                    <div className="text-xs text-gray-400">Overall Progress</div>
-                    <div className="font-black text-brand-400 text-lg mt-0.5">
-                      {Math.round((primaryActive.progress || 0) * 100)}%
+                    <div className="text-xs text-gray-400">Current Task Progress</div>
+                    <div className="font-black text-brand-400 text-lg mt-0.5 flex items-center gap-2">
+                      <span>{Math.round((primaryActive.progress || 0) * 100)}%</span>
+                      {primaryActive.estimated_remaining_formatted && primaryActive.status === "processing" && (
+                        <span className="text-xs font-normal text-slate-400 font-mono">
+                          (~{primaryActive.estimated_remaining_formatted} left)
+                        </span>
+                      )}
                     </div>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
+                    <div className="text-xs text-gray-400">Total Queue ETA</div>
+                    <div className="font-black text-indigo-400 text-lg mt-0.5">
+                      ~{queueSummary.estimated_time_formatted}
+                    </div>
+                    {queueSummary.estimated_finish_time && (
+                      <div className="text-[11px] text-slate-400 mt-0.5">
+                        Est. Finish: {new Date(queueSummary.estimated_finish_time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -1263,8 +1397,63 @@
                 </div>
                 <p className="text-xs text-slate-400 flex items-center justify-between">
                   <span>Current Step: <strong className="text-slate-200">{primaryActive.current_step}</strong></span>
-                  <span className="text-[11px] text-slate-500">Updates live over WebSocket</span>
+                  <span className="text-[11px] text-slate-500">Live 3s polling & WebSocket stream</span>
                 </p>
+
+                {/* Queue Backlog List (when jobs are waiting) */}
+                {queuedJobs.length > 0 && (
+                  <div className="mt-4 pt-4 border-t border-white/5 space-y-2.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                        <span>⏳</span>
+                        <span>Waiting in Queue ({queuedJobs.length} {queuedJobs.length === 1 ? 'task' : 'tasks'})</span>
+                      </span>
+                      <span className="text-slate-400 font-mono text-[11px]">
+                        Concurrency: 2 parallel workers
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                      {queuedJobs.map((qJob, qIdx) => (
+                        <div key={qJob.job_id || qIdx} className="p-3 rounded-xl bg-surface-900/90 border border-white/5 flex items-center justify-between gap-2.5 hover:border-white/10 transition">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-800 text-amber-400 font-bold">
+                                #{qIdx + 1}
+                              </span>
+                              <span className="font-bold text-xs text-white truncate">
+                                {qJob.part_name || "Part"}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-400 truncate mt-0.5" title={qJob.video_title || ""}>
+                              {qJob.video_title || (qJob.target_langs ? qJob.target_langs.join(', ').toUpperCase() : 'Dubbing Task')}
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0 flex items-center gap-2">
+                            <div>
+                              <span className="text-[11px] font-mono text-brand-400 font-bold block">
+                                ~{qJob.estimated_duration_formatted || "3m"}
+                              </span>
+                              <span className="text-[10px] text-slate-500 uppercase font-semibold">
+                                Queued
+                              </span>
+                            </div>
+                            {onCancelJob && (
+                              <button
+                                type="button"
+                                onClick={() => onCancelJob(qJob.job_id, qJob.part_name || qJob.video_title)}
+                                className="p-1.5 rounded-lg bg-surface-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 border border-white/5 transition"
+                                title="Cancel and remove from queue"
+                              >
+                                <Icons.Close />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -1274,7 +1463,7 @@
                     <h2 className="text-base font-bold text-white">Conversion Engine Ready (Idle)</h2>
                   </div>
                   <p className="text-xs text-slate-400">
-                    No conversion jobs currently executing. The automated dubbing pipeline is idle and ready for video conversion.
+                    Queue is empty. 0 jobs waiting. The automated dubbing pipeline is idle and ready for video conversion.
                   </p>
                 </div>
                 <button
@@ -1310,11 +1499,28 @@
 
             <div className="glass-card rounded-2xl p-5 border border-white/5">
               <div className="flex items-center justify-between text-slate-400 mb-2">
-                <span className="text-xs font-semibold uppercase tracking-wider">Active Running</span>
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+                <span className="text-xs font-semibold uppercase tracking-wider">Queue & Pipeline</span>
+                {queueSummary.total_pending > 0 ? (
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+                ) : (
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                )}
               </div>
-              <div className="text-3xl font-black text-amber-400">{counts.active_jobs}</div>
-              <div className="text-[11px] text-slate-400 mt-1">Currently in pipeline</div>
+              <div className="text-3xl font-black text-amber-400">
+                {queueSummary.total_in_queue > 0 ? (
+                  <span>{queueSummary.total_in_queue} <span className="text-sm font-semibold text-slate-400">in queue</span></span>
+                ) : queueSummary.total_processing > 0 ? (
+                  <span>{queueSummary.total_processing} <span className="text-sm font-semibold text-slate-400">running</span></span>
+                ) : (
+                  <span className="text-emerald-400">0</span>
+                )}
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1 flex items-center justify-between">
+                <span>{queueSummary.total_pending > 0 ? `⏱ Est. ~${queueSummary.estimated_time_formatted}` : "Pipeline idle (ready)"}</span>
+                {queueSummary.total_processing > 0 && queueSummary.total_in_queue > 0 && (
+                  <span className="text-amber-400 font-mono font-bold">({queueSummary.total_processing} running)</span>
+                )}
+              </div>
             </div>
 
             <div className="glass-card rounded-2xl p-5 border border-white/5">
@@ -1656,7 +1862,7 @@
     // =========================================================================
     // Video Details View (Contains Current Dubbing Form & Converted Videos Section)
     // =========================================================================
-    function VideoDetailsView({ videoId, onBack, onJobCreated, onDeleteVideo }) {
+    function VideoDetailsView({ videoId, onBack, onJobCreated, onDeleteVideo, onCancelJob }) {
       const [video, setVideo] = useState(null);
       const [isLoading, setIsLoading] = useState(true);
 
@@ -1676,6 +1882,25 @@
               })
               .catch(err => alert("Error: " + err.message));
           }
+        }
+      };
+
+      const handleCancelConversion = async (jobId, partName) => {
+        const name = partName || jobId;
+        if (!window.confirm(`Are you sure you want to stop/cancel "${name}"?`)) {
+          return;
+        }
+        try {
+          const res = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+          if (res.ok) {
+            loadVideo();
+            onJobCreated && onJobCreated();
+          } else {
+            const err = await res.json().catch(() => ({}));
+            alert("Failed to cancel job: " + (err.detail || "Server error"));
+          }
+        } catch (err) {
+          alert("Error cancelling job: " + err.message);
         }
       };
 
@@ -1728,6 +1953,10 @@
       const [isFetchingPack, setIsFetchingPack] = useState(false);
       const [copiedField, setCopiedField] = useState(null);
 
+      // Selected parts for batch queuing
+      const [selectedPartIndices, setSelectedPartIndices] = useState([]);
+      const [batchQueueStatus, setBatchQueueStatus] = useState("");
+
       // Load Video details from API
       const loadVideo = async () => {
         try {
@@ -1737,6 +1966,21 @@
             setVideo(data);
             if (data.youtube_url && !youtubeUrl) {
               setYoutubeUrl(data.youtube_url);
+            }
+            // Auto fetch duration if not stored
+            if (data.youtube_url && (!data.duration_seconds || data.duration_seconds <= 0)) {
+              fetch("/api/video-info", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url: data.youtube_url })
+              })
+                .then(r => r.json())
+                .then(info => {
+                  if (info.duration_seconds) {
+                    setVideo(prev => prev ? { ...prev, duration_seconds: info.duration_seconds } : prev);
+                  }
+                })
+                .catch(() => {});
             }
           }
         } catch (e) {
@@ -1785,12 +2029,25 @@
         };
       }, [activeJobId]);
 
-      // Calculate Parts from Duration (Default sample 60 min or custom)
+      // Calculate Parts from Duration (uses real duration if available, else 3600s)
       const calculatePartsList = () => {
-        const totalSec = 3600; // 1 hour baseline
-        const partSec = partDurationMins * 60;
-        const totalParts = Math.ceil(totalSec / partSec);
+        const totalSec = (video && video.duration_seconds && video.duration_seconds > 0)
+          ? video.duration_seconds
+          : 3600;
+        const partSec = Math.max(60, partDurationMins * 60);
+        const totalParts = Math.max(1, Math.ceil(totalSec / partSec));
         const list = [];
+
+        const formatTime = (s) => {
+          const h = Math.floor(s / 3600);
+          const m = Math.floor((s % 3600) / 60);
+          const sec = Math.floor(s % 60);
+          if (h > 0) {
+            return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+          }
+          return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+        };
+
         for (let i = 0; i < totalParts; i++) {
           const startSec = i * partSec;
           const endSec = Math.min((i + 1) * partSec, totalSec);
@@ -1798,13 +2055,146 @@
             index: i,
             label: `Part ${i + 1}`,
             start_seconds: startSec,
-            duration_seconds: endSec - startSec
+            duration_seconds: endSec - startSec,
+            time_range: `${formatTime(startSec)} - ${formatTime(endSec)}`,
+            duration_mins: Math.round(((endSec - startSec) / 60) * 10) / 10
           });
         }
         return list;
       };
 
       const partsList = calculatePartsList();
+
+      // Synchronize selected parts to select all by default
+      useEffect(() => {
+        setSelectedPartIndices(partsList.map(p => p.index));
+      }, [partsList.length, partDurationMins, video?.duration_seconds]);
+
+      // Polling for live status while jobs are queued or processing
+      useEffect(() => {
+        const convList = video?.conversions || [];
+        const hasPending = convList.some(c => c.status === "queued" || c.status === "processing") || Boolean(activeJobId);
+        if (!hasPending) return;
+
+        const interval = setInterval(() => {
+          loadVideo();
+        }, 3000);
+
+        return () => clearInterval(interval);
+      }, [video?.conversions, activeJobId]);
+
+      // Auto-attach WebSocket to the currently processing job in queue
+      useEffect(() => {
+        const convList = video?.conversions || [];
+        if (!activeJobId) {
+          const running = convList.find(c => c.status === "processing");
+          if (running) {
+            setActiveJobId(running.job_id);
+          }
+        }
+      }, [video?.conversions, activeJobId]);
+
+      // Batch queue submission for all parts
+      const handleQueueAllParts = async (partsToQueue) => {
+        const targetParts = (partsToQueue && partsToQueue.length > 0) ? partsToQueue : partsList;
+        if (!targetParts || targetParts.length === 0) {
+          alert("No parts available to queue.");
+          return;
+        }
+        if (!youtubeUrl.trim()) {
+          alert("Please enter a valid YouTube video URL.");
+          return;
+        }
+
+        setIsSubmitting(true);
+        setBatchQueueStatus(`Queuing ${targetParts.length} parts into pipeline...`);
+        setJobProgress(0.01);
+        setJobStep(`Queuing ${targetParts.length} parts in background pipeline...`);
+        setJobLogs([`[${new Date().toLocaleTimeString()}] Submitting batch of ${targetParts.length} parts to queue...`]);
+
+        try {
+          const payload = {
+            video_id: videoId,
+            youtube_url: youtubeUrl.trim(),
+            target_lang: isMultiLang ? (selectedLangs[0] || targetLang) : targetLang,
+            target_langs: isMultiLang ? selectedLangs.join(",") : targetLang,
+            voice: selectedVoice,
+            whisper_model: whisperModel,
+            bg_volume: bgVolume,
+            vocals_volume: vocalsVolume,
+            speed_cap: speedCap,
+            enable_watermark: enableWatermark,
+            watermark_text: watermarkText.trim() || undefined,
+            gemini_api_key: geminiApiKey.trim() || undefined,
+            parts: targetParts.map(p => ({
+              part_name: p.label,
+              start_seconds: p.start_seconds,
+              duration_seconds: p.duration_seconds,
+              time_range: p.time_range
+            }))
+          };
+
+          const res = await fetch("/api/dub/batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            setBatchQueueStatus(`✓ All ${targetParts.length} parts added to queue!`);
+            if (data.jobs && data.jobs.length > 0) {
+              setActiveJobId(data.jobs[0].job_id);
+            }
+            await loadVideo();
+            onJobCreated && onJobCreated();
+          } else {
+            // Fallback loop if batch endpoint not available
+            let queuedCount = 0;
+            for (const p of targetParts) {
+              const formData = new FormData();
+              formData.append("video_id", videoId);
+              formData.append("youtube_url", youtubeUrl.trim());
+              if (isMultiLang) {
+                formData.append("target_langs", selectedLangs.join(","));
+                formData.append("target_lang", selectedLangs[0] || targetLang);
+              } else {
+                formData.append("target_lang", targetLang);
+              }
+              formData.append("voice", selectedVoice);
+              formData.append("whisper_model", whisperModel);
+              formData.append("bg_volume", String(bgVolume));
+              formData.append("vocals_volume", String(vocalsVolume));
+              formData.append("speed_cap", String(speedCap));
+              formData.append("part_name", p.label);
+              formData.append("start_seconds", String(p.start_seconds));
+              formData.append("duration_seconds", String(p.duration_seconds));
+              if (enableWatermark && watermarkText.trim()) {
+                formData.append("enable_watermark", "true");
+                formData.append("watermark_text", watermarkText.trim());
+              }
+              if (geminiApiKey.trim()) {
+                formData.append("gemini_api_key", geminiApiKey.trim());
+              }
+
+              const singleRes = await fetch("/api/dub", { method: "POST", body: formData });
+              if (singleRes.ok) {
+                queuedCount++;
+                const jData = await singleRes.json();
+                if (!activeJobId) setActiveJobId(jData.job_id);
+              }
+            }
+            setBatchQueueStatus(`✓ Queued ${queuedCount} parts in queue!`);
+            await loadVideo();
+            onJobCreated && onJobCreated();
+          }
+        } catch (err) {
+          alert("Error queuing parts: " + err.message);
+        } finally {
+          setIsSubmitting(false);
+          setTimeout(() => setBatchQueueStatus(""), 4500);
+        }
+      };
 
       const handleStartDubbing = async (e) => {
         e.preventDefault();
@@ -1813,10 +2203,19 @@
           return;
         }
 
+        // If in parts mode, queue selected parts or all parts
+        if (splitMode === "parts") {
+          const partsToRun = selectedPartIndices.length > 0
+            ? partsList.filter(p => selectedPartIndices.includes(p.index))
+            : partsList;
+          await handleQueueAllParts(partsToRun);
+          return;
+        }
+
         setIsSubmitting(true);
         setJobProgress(0.02);
-        setJobStep("Submitting dubbing job to backend...");
-        setJobLogs(["[00:00:00] Initializing dubbing job..."]);
+        setJobStep("Submitting full video dubbing job to backend...");
+        setJobLogs(["[00:00:00] Initializing full video dubbing job..."]);
 
         try {
           const formData = new FormData();
@@ -1835,13 +2234,6 @@
           formData.append("bg_volume", String(bgVolume));
           formData.append("vocals_volume", String(vocalsVolume));
           formData.append("speed_cap", String(speedCap));
-
-          if (splitMode === "parts") {
-            const part = partsList[selectedPartIndex] || partsList[0];
-            formData.append("part_name", part.label);
-            formData.append("start_seconds", String(part.start_seconds));
-            formData.append("duration_seconds", String(part.duration_seconds));
-          }
 
           if (enableWatermark && watermarkText.trim()) {
             formData.append("enable_watermark", "true");
@@ -2126,50 +2518,165 @@
                 </div>
 
                 {splitMode === "parts" && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        Part Duration: {partDurationMins} minutes
-                      </label>
-                      <input
-                        type="range"
-                        min="5"
-                        max="30"
-                        step="5"
-                        value={partDurationMins}
-                        onChange={(e) => setPartDurationMins(parseInt(e.target.value))}
-                        className="w-full accent-brand-500"
-                      />
+                  <div className="space-y-4 pt-2">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="text-xs font-semibold text-slate-300">
+                            Part Duration: <span className="font-bold text-brand-400">{partDurationMins} minutes</span>
+                          </label>
+                          <span className="text-[11px] text-slate-400 font-mono">
+                            {partsList.length} total part{partsList.length > 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="5"
+                          max={Math.max(60, Math.min(180, Math.ceil((video?.duration_seconds || 3600) / 60)))}
+                          step="5"
+                          value={partDurationMins}
+                          onChange={(e) => setPartDurationMins(parseInt(e.target.value))}
+                          className="w-full accent-brand-500 mb-2"
+                        />
+                        <div className="flex flex-wrap gap-1.5">
+                          {[5, 10, 15, 20, 30, 45, 60].map(mins => (
+                            <button
+                              type="button"
+                              key={mins}
+                              onClick={() => setPartDurationMins(mins)}
+                              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition ${partDurationMins === mins ? 'bg-brand-600 text-white' : 'bg-surface-850 text-slate-400 hover:text-white border border-white/5'}`}
+                            >
+                              {mins}m
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-surface-950/70 border border-white/5 flex flex-col justify-between">
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="text-slate-400">Total Video Duration:</span>
+                          <span className="font-bold text-white font-mono">
+                            {video?.duration_seconds ? `${Math.floor(video.duration_seconds / 60)}m ${Math.floor(video.duration_seconds % 60)}s` : '~60 mins'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="text-slate-400">Selected for Queue:</span>
+                          <span className="font-bold text-brand-400 font-mono">
+                            {selectedPartIndices.length} of {partsList.length} parts
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPartIndices(partsList.map(p => p.index))}
+                            className="px-2 py-0.5 rounded text-[11px] font-semibold bg-surface-800 hover:bg-surface-700 text-slate-300"
+                          >
+                            Select All
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPartIndices([])}
+                            className="px-2 py-0.5 rounded text-[11px] font-semibold bg-surface-800 hover:bg-surface-700 text-slate-400"
+                          >
+                            Deselect All
+                          </button>
+                        </div>
+                      </div>
                     </div>
+
+                    {/* Interactive Parts Grid / Checklist */}
                     <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        Select Part to Dub
-                      </label>
-                      <select
-                        value={selectedPartIndex}
-                        onChange={(e) => setSelectedPartIndex(parseInt(e.target.value))}
-                        className="w-full px-3 py-1.5 rounded-lg bg-surface-900 border border-slate-700 text-xs text-slate-100"
-                      >
-                        {partsList.map(p => (
-                          <option key={p.index} value={p.index}>
-                            {p.label} (Minutes: {Math.floor(p.start_seconds / 60)} - {Math.floor((p.start_seconds + p.duration_seconds) / 60)})
-                          </option>
-                        ))}
-                      </select>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                          Parts in Queue ({selectedPartIndices.length} selected)
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          Check all parts to convert them in one queue
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-48 overflow-y-auto p-2 rounded-xl bg-surface-950/80 border border-slate-800">
+                        {partsList.map(p => {
+                          const isSelected = selectedPartIndices.includes(p.index);
+                          const existingConv = conversions.find(c => c.part_name === p.label);
+                          return (
+                            <div
+                              key={p.index}
+                              onClick={() => {
+                                setSelectedPartIndices(prev =>
+                                  isSelected ? prev.filter(i => i !== p.index) : [...prev, p.index]
+                                );
+                              }}
+                              className={`p-2.5 rounded-lg border text-xs cursor-pointer transition flex items-center justify-between ${isSelected ? 'bg-brand-600/10 border-brand-500/40 text-white' : 'bg-surface-900 border-white/5 text-slate-400 hover:border-slate-700'}`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => {}} // handled by parent onClick
+                                  className="rounded bg-surface-800 border-slate-700 text-brand-600 focus:ring-0"
+                                />
+                                <div>
+                                  <div className="font-bold text-white text-[11px]">{p.label}</div>
+                                  <div className="text-[10px] text-slate-400 font-mono">{p.time_range}</div>
+                                </div>
+                              </div>
+                              {existingConv && (
+                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${existingConv.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300' : (existingConv.status === 'processing' ? 'bg-brand-500/20 text-brand-300' : 'bg-amber-500/20 text-amber-300')}`}>
+                                  {existingConv.status}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Submit Button */}
+              {batchQueueStatus && (
+                <div className="p-3 rounded-xl bg-brand-500/10 border border-brand-500/30 text-brand-300 text-xs font-semibold flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-brand-400 animate-ping"></span>
+                  <span>{batchQueueStatus}</span>
+                </div>
+              )}
+
+              {/* Submit Buttons */}
               <div className="pt-2">
-                <button
-                  type="submit"
-                  disabled={isSubmitting || Boolean(activeJobId)}
-                  className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white font-bold text-sm shadow-xl shadow-brand-500/20 transition transform active:scale-95 disabled:opacity-50"
-                >
-                  {isSubmitting ? "Starting Dubbing Pipeline..." : `Start Conversion for ${splitMode === 'parts' ? `Part ${selectedPartIndex + 1}` : 'Full Video'}`}
-                </button>
+                {splitMode === "parts" ? (
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const partsToQueue = selectedPartIndices.length > 0
+                          ? partsList.filter(p => selectedPartIndices.includes(p.index))
+                          : partsList;
+                        handleQueueAllParts(partsToQueue);
+                      }}
+                      disabled={isSubmitting || selectedPartIndices.length === 0}
+                      className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-brand-600 via-indigo-600 to-violet-600 hover:from-brand-500 hover:to-violet-500 text-white font-bold text-sm shadow-xl shadow-brand-500/20 transition transform active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      <span>⚡</span>
+                      <span>
+                        {isSubmitting
+                          ? "Submitting All Parts to Queue..."
+                          : `Queue All Parts in Background (${selectedPartIndices.length} Parts in Queue)`}
+                      </span>
+                    </button>
+                    <p className="text-[11px] text-center text-slate-400">
+                      All selected parts will be queued in the background. The worker pipeline runs each part sequentially without manual steps.
+                    </p>
+                  </div>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={isSubmitting || Boolean(activeJobId)}
+                    className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white font-bold text-sm shadow-xl shadow-brand-500/20 transition transform active:scale-95 disabled:opacity-50"
+                  >
+                    {isSubmitting ? "Starting Dubbing Pipeline..." : "Start Conversion for Full Video"}
+                  </button>
+                )}
               </div>
             </form>
           </div>
@@ -2180,7 +2687,7 @@
               <div>
                 <h3 className="font-bold text-lg text-white">Converted Videos & Parts ({conversions.length})</h3>
                 <p className="text-xs text-slate-400">
-                  All single or multipart conversions created inside this videoID section
+                  All single or multipart conversions created inside this video project
                 </p>
               </div>
               <button
@@ -2199,42 +2706,95 @@
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {conversions.map((conv, idx) => (
-                  <div key={conv.job_id || idx} className="glass-panel rounded-xl p-5 border border-white/5 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="font-black text-sm text-white">{conv.part_name || "Full Video"}</span>
-                        <span className="text-[10px] text-slate-400 font-mono">Job: {conv.job_id}</span>
-                      </div>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 uppercase">
-                        {conv.status || "Completed"}
-                      </span>
-                    </div>
+                {conversions.map((conv, idx) => {
+                  const isQueued = conv.status === "queued";
+                  const isProcessing = conv.status === "processing";
+                  const isCompleted = conv.status === "completed";
+                  const isFailed = conv.status === "failed";
 
-                    {/* Language badges */}
-                    <div className="flex items-center gap-1.5">
-                      {(conv.languages || []).map(l => (
-                        <span key={l} className="text-xs px-2 py-0.5 rounded bg-surface-800 text-slate-200 border border-white/5 font-semibold">
-                          {LANG_MAP[l]?.flag} {LANG_MAP[l]?.name || l.toUpperCase()}
-                        </span>
-                      ))}
-                    </div>
+                  return (
+                    <div key={conv.job_id || idx} className="glass-panel rounded-xl p-5 border border-white/5 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-black text-sm text-white">{conv.part_name || "Full Video"}</span>
+                          {conv.time_range && (
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-surface-800 text-slate-300 font-mono border border-white/5">
+                              {conv.time_range}
+                            </span>
+                          )}
+                          <span className="text-[10px] text-slate-400 font-mono">Job: {conv.job_id}</span>
+                        </div>
 
-                    {/* Video Player */}
-                    {conv.output_video_url ? (
-                      <div className="rounded-xl overflow-hidden bg-black border border-white/10 aspect-video">
-                        <video
-                          controls
-                          className="w-full h-full object-contain"
-                          src={conv.output_video_url}
-                          preload="metadata"
-                        />
+                        {/* Status Badge */}
+                        {isQueued && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 uppercase flex items-center gap-1">
+                            <span>⏳</span>
+                            <span>Queued</span>
+                          </span>
+                        )}
+                        {isProcessing && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 uppercase flex items-center gap-1 animate-pulse">
+                            <span className="w-1.5 h-1.5 rounded-full bg-brand-400 animate-ping"></span>
+                            <span>Processing ({Math.round((conv.progress || 0.05) * 100)}%)</span>
+                          </span>
+                        )}
+                        {isCompleted && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 uppercase">
+                            ✓ Completed
+                          </span>
+                        )}
+                        {isFailed && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20 uppercase">
+                            ✗ Failed
+                          </span>
+                        )}
+                        {conv.status === "cancelled" && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-500/20 text-slate-400 border border-slate-500/30 uppercase flex items-center gap-1">
+                            <span>🛑</span>
+                            <span>Cancelled</span>
+                          </span>
+                        )}
                       </div>
-                    ) : (
-                      <div className="aspect-video bg-surface-900 rounded-xl flex items-center justify-center text-xs text-slate-500">
-                        Video rendering in background...
+
+                      {/* Language badges */}
+                      <div className="flex items-center gap-1.5">
+                        {(conv.languages || []).map(l => (
+                          <span key={l} className="text-xs px-2 py-0.5 rounded bg-surface-800 text-slate-200 border border-white/5 font-semibold">
+                            {LANG_MAP[l]?.flag} {LANG_MAP[l]?.name || l.toUpperCase()}
+                          </span>
+                        ))}
                       </div>
-                    )}
+
+                      {/* Video Player or Live Progress Area */}
+                      {conv.output_video_url ? (
+                        <div className="rounded-xl overflow-hidden bg-black border border-white/10 aspect-video">
+                          <video
+                            controls
+                            className="w-full h-full object-contain"
+                            src={conv.output_video_url}
+                            preload="metadata"
+                          />
+                        </div>
+                      ) : isQueued ? (
+                        <div className="aspect-video bg-surface-900 rounded-xl flex flex-col items-center justify-center p-4 text-center border border-dashed border-amber-500/20">
+                          <div className="text-2xl mb-1.5">⏳</div>
+                          <span className="text-xs font-bold text-amber-300">Queued in Pipeline</span>
+                          <span className="text-[11px] text-slate-400 mt-1">Waiting in queue. Processing will begin automatically.</span>
+                        </div>
+                      ) : isProcessing ? (
+                        <div className="aspect-video bg-surface-900 rounded-xl flex flex-col items-center justify-center p-4 text-center border border-brand-500/20">
+                          <div className="w-3 h-3 rounded-full bg-brand-400 animate-ping mb-2"></div>
+                          <span className="text-xs font-bold text-brand-300">Dubbing & Rendering Part...</span>
+                          <div className="w-3/4 bg-surface-950 rounded-full h-2 mt-2.5 overflow-hidden">
+                            <div className="bg-brand-500 h-2 rounded-full transition-all duration-300" style={{ width: `${Math.round((conv.progress || 0.05) * 100)}%` }}></div>
+                          </div>
+                          <span className="text-[10px] text-slate-400 font-mono mt-1.5">{Math.round((conv.progress || 0) * 100)}% complete</span>
+                        </div>
+                      ) : (
+                        <div className="aspect-video bg-surface-900 rounded-xl flex items-center justify-center text-xs text-slate-500">
+                          Video rendering in background...
+                        </div>
+                      )}
 
                     {/* Action Buttons */}
                     <div className="flex flex-wrap items-center gap-2 pt-2">
@@ -2268,6 +2828,18 @@
                         SEO & Thumbnail Pack
                       </button>
 
+                      {(isQueued || isProcessing) && (
+                        <button
+                          type="button"
+                          onClick={() => handleCancelConversion(conv.job_id, conv.part_name)}
+                          className="px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600/30 text-red-300 hover:text-white border border-red-500/30 text-xs font-bold transition flex items-center gap-1.5"
+                          title="Stop and cancel this job"
+                        >
+                          <Icons.Stop />
+                          <span>{isProcessing ? "Stop" : "Cancel"}</span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => handleDeleteConversion(conv.job_id, conv.part_name)}
@@ -2278,7 +2850,8 @@
                       </button>
                     </div>
                   </div>
-                ))}
+                );
+              })}
               </div>
             )}
           </div>
@@ -2310,6 +2883,7 @@
     function AddVideoModal({ onClose, onCreated }) {
       const [title, setTitle] = useState("");
       const [youtubeUrl, setYoutubeUrl] = useState("");
+      const [durationSeconds, setDurationSeconds] = useState(null);
       const [isFetchingInfo, setIsFetchingInfo] = useState(false);
       const [isSaving, setIsSaving] = useState(false);
 
@@ -2325,6 +2899,7 @@
           if (res.ok) {
             const data = await res.json();
             if (data.title && !title) setTitle(data.title);
+            if (data.duration_seconds) setDurationSeconds(data.duration_seconds);
           }
         } catch (e) {
           console.error("Failed to fetch info:", e);
@@ -2344,7 +2919,8 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               title: title.trim(),
-              youtube_url: youtubeUrl.trim()
+              youtube_url: youtubeUrl.trim(),
+              duration_seconds: durationSeconds
             })
           });
           if (res.ok) {

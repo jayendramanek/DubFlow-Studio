@@ -21,7 +21,9 @@ import {
   Layers,
   Sparkles,
   Youtube,
-  Scissors
+  Scissors,
+  Square,
+  X
 } from 'lucide-react';
 
 // Dubbing Languages Metadata
@@ -618,13 +620,15 @@ export default function App() {
       fetchVideos();
       fetchYtdChannels();
       fetchYtdStats();
+      const isBusy = (systemStats?.counts?.active_jobs > 0) || (systemStats?.queue_summary?.total_pending > 0);
+      const intervalMs = isBusy ? 3000 : 8000;
       const interval = setInterval(() => {
         fetchStats();
         fetchYtdStats();
-      }, 8000);
+      }, intervalMs);
       return () => clearInterval(interval);
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, systemStats?.counts?.active_jobs, systemStats?.queue_summary?.total_pending]);
 
   const handleLogout = () => {
     localStorage.removeItem("admin_auth");
@@ -676,6 +680,43 @@ export default function App() {
       } catch (err) {
         alert("Error deleting conversion: " + err.message);
       }
+    }
+  };
+
+  const handleCancelJob = async (jobId, label) => {
+    const name = label || jobId;
+    if (!window.confirm(`Are you sure you want to stop/cancel "${name}"?`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+      if (res.ok) {
+        fetchStats();
+        fetchVideos();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert("Failed to cancel job: " + (err.detail || "Server error"));
+      }
+    } catch (err) {
+      alert("Error cancelling job: " + err.message);
+    }
+  };
+
+  const handleCancelAllQueue = async () => {
+    if (!window.confirm("Are you sure you want to cancel all currently queued and running conversions?")) {
+      return;
+    }
+    try {
+      const res = await fetch("/api/queue/cancel-all", { method: "POST" });
+      if (res.ok) {
+        fetchStats();
+        fetchVideos();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert("Failed to cancel queue: " + (err.detail || "Server error"));
+      }
+    } catch (err) {
+      alert("Error cancelling queue: " + err.message);
     }
   };
 
@@ -904,69 +945,237 @@ export default function App() {
           {activeTab === "dashboard" && (
             <div className="space-y-8">
               {/* Active Conversion Banner */}
-              <div className="glass-card rounded-2xl p-6 border border-white/10">
-                {systemStats?.active_jobs?.length > 0 ? (
-                  <div>
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-3">
-                        <span className="w-3 h-3 rounded-full bg-amber-400 animate-ping"></span>
-                        <h2 className="text-base font-bold text-white">Active Video Conversion In Progress</h2>
-                      </div>
-                      <span className="text-xs px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 font-bold uppercase">
-                        Running
-                      </span>
-                    </div>
-                    <div className="w-full bg-surface-900 rounded-full h-3 overflow-hidden mb-2">
-                      <div
-                        className="bg-brand-500 h-3 rounded-full transition-all duration-300"
-                        style={{ width: `${Math.round((systemStats.active_jobs[0].progress || 0) * 100)}%` }}
-                      ></div>
-                    </div>
-                    <p className="text-xs text-slate-400">
-                      Current Step: <strong className="text-slate-200">{systemStats.active_jobs[0].current_step}</strong>
-                    </p>
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
-                        <h2 className="text-base font-bold text-white">Conversion Engine Ready (Idle)</h2>
-                      </div>
-                      <p className="text-xs text-slate-400">
-                        No active conversions executing. System is ready to convert new videos.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsAddVideoModalOpen(true)}
-                      className="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs transition"
-                    >
-                      Start New Video Conversion
-                    </button>
-                  </div>
-                )}
-              </div>
+              {/* Active Conversion & Queue Status Card */}
+              {(() => {
+                const queueSummary = systemStats?.queue_summary || {
+                  total_in_queue: systemStats?.counts?.queued_jobs || 0,
+                  total_processing: systemStats?.counts?.processing_jobs || 0,
+                  total_pending: systemStats?.counts?.active_jobs || 0,
+                  estimated_seconds_remaining: 0,
+                  estimated_time_formatted: systemStats?.counts?.estimated_queue_time || "0s",
+                  estimated_finish_time: null,
+                  processing_jobs: [],
+                  queued_jobs: []
+                };
+                const processingJobs = queueSummary.processing_jobs || [];
+                const queuedJobs = queueSummary.queued_jobs || [];
+                const hasPending = queueSummary.total_pending > 0;
+                const primaryActive = processingJobs.length > 0 ? processingJobs[0] : (queuedJobs.length > 0 ? queuedJobs[0] : null);
 
-              {/* KPI Stat Cards */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="glass-card rounded-2xl p-5 border border-white/5">
-                  <div className="text-xs text-slate-400 uppercase font-semibold">Total Videos</div>
-                  <div className="text-3xl font-black text-white mt-1">{systemStats?.counts?.total_videos || 0}</div>
-                </div>
-                <div className="glass-card rounded-2xl p-5 border border-white/5">
-                  <div className="text-xs text-slate-400 uppercase font-semibold">Converted Parts</div>
-                  <div className="text-3xl font-black text-indigo-400 mt-1">{systemStats?.counts?.total_conversions || 0}</div>
-                </div>
-                <div className="glass-card rounded-2xl p-5 border border-white/5">
-                  <div className="text-xs text-slate-400 uppercase font-semibold">Currently Running</div>
-                  <div className="text-3xl font-black text-amber-400 mt-1">{systemStats?.counts?.active_jobs || 0}</div>
-                </div>
-                <div className="glass-card rounded-2xl p-5 border border-white/5">
-                  <div className="text-xs text-slate-400 uppercase font-semibold">Languages Converted</div>
-                  <div className="text-3xl font-black text-emerald-400 mt-1">{systemStats?.counts?.total_languages || 0}</div>
-                </div>
-              </div>
+                return (
+                  <>
+                    <div className="glass-card rounded-2xl p-6 border border-white/10 relative overflow-hidden">
+                      {hasPending && primaryActive ? (
+                        <div>
+                          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                            <div className="flex items-center gap-3">
+                              <span className="flex h-3 w-3 relative">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+                              </span>
+                              <div>
+                                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                                  <span>Active Video Conversion & Queue</span>
+                                  <span className="text-xs px-2 py-0.5 rounded-full bg-surface-800 text-slate-300 font-mono border border-white/10">
+                                    {queueSummary.total_pending} {queueSummary.total_pending === 1 ? 'Job' : 'Jobs'} Total
+                                  </span>
+                                </h2>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {queueSummary.total_processing > 0 && (
+                                <span className="text-xs px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                                  <span>{queueSummary.total_processing} Running</span>
+                                </span>
+                              )}
+                              {queueSummary.total_in_queue > 0 && (
+                                <span className="text-xs px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                                  <span>⏳</span>
+                                  <span>{queueSummary.total_in_queue} in Queue</span>
+                                </span>
+                              )}
+                              {queueSummary.estimated_seconds_remaining > 0 && (
+                                <span className="text-xs px-3 py-1 rounded-full bg-gradient-to-r from-brand-600/30 to-indigo-600/30 text-brand-300 border border-brand-500/30 font-bold tracking-wide flex items-center gap-1.5 shadow-sm">
+                                  <span>⏱ Approx. {queueSummary.estimated_time_formatted} Remaining</span>
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                            <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
+                              <div className="text-xs text-gray-400">Current Task</div>
+                              <div className="font-bold text-white text-sm truncate mt-0.5" title={primaryActive.video_title || primaryActive.part_name || "Full Video"}>
+                                {primaryActive.part_name || "Full Video"}
+                              </div>
+                              {primaryActive.video_title && (
+                                <div className="text-[11px] text-slate-400 truncate mt-0.5" title={primaryActive.video_title}>
+                                  {primaryActive.video_title}
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
+                              <div className="text-xs text-gray-400">Target Languages</div>
+                              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                                {(primaryActive.target_langs || []).map(l => (
+                                  <span key={l} className="text-xs px-2 py-0.5 rounded bg-surface-800 text-slate-200 border border-white/5 font-semibold">
+                                    {l.toUpperCase()}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
+                              <div className="text-xs text-gray-400">Current Task Progress</div>
+                              <div className="font-black text-brand-400 text-lg mt-0.5 flex items-center gap-2">
+                                <span>{Math.round((primaryActive.progress || 0) * 100)}%</span>
+                                {primaryActive.estimated_remaining_formatted && primaryActive.status === "processing" && (
+                                  <span className="text-xs font-normal text-slate-400 font-mono">
+                                    (~{primaryActive.estimated_remaining_formatted} left)
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="p-3.5 rounded-xl bg-surface-900 border border-white/5">
+                              <div className="text-xs text-gray-400">Total Queue ETA</div>
+                              <div className="font-black text-indigo-400 text-lg mt-0.5">
+                                ~{queueSummary.estimated_time_formatted}
+                              </div>
+                              {queueSummary.estimated_finish_time && (
+                                <div className="text-[11px] text-slate-400 mt-0.5">
+                                  Est. Finish: {new Date(queueSummary.estimated_finish_time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Progress bar */}
+                          <div className="w-full bg-surface-900 rounded-full h-3 overflow-hidden mb-2">
+                            <div
+                              className="bg-gradient-to-r from-brand-600 via-indigo-500 to-pink-500 h-3 rounded-full transition-all duration-300"
+                              style={{ width: `${Math.round((primaryActive.progress || 0) * 100)}%` }}
+                            ></div>
+                          </div>
+                          <p className="text-xs text-slate-400 flex items-center justify-between">
+                            <span>Current Step: <strong className="text-slate-200">{primaryActive.current_step}</strong></span>
+                            <span className="text-[11px] text-slate-500">Live 3s polling & WebSocket stream</span>
+                          </p>
+
+                          {/* Queue Backlog List (when jobs are waiting) */}
+                          {queuedJobs.length > 0 && (
+                            <div className="mt-4 pt-4 border-t border-white/5 space-y-2.5">
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                                  <span>⏳</span>
+                                  <span>Waiting in Queue ({queuedJobs.length} {queuedJobs.length === 1 ? 'task' : 'tasks'})</span>
+                                </span>
+                                <span className="text-slate-400 font-mono text-[11px]">
+                                  Concurrency: 2 parallel workers
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                                {queuedJobs.map((qJob, qIdx) => (
+                                  <div key={qJob.job_id || qIdx} className="p-3 rounded-xl bg-surface-900/90 border border-white/5 flex items-center justify-between gap-2.5 hover:border-white/10 transition">
+                                    <div className="min-w-0">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-800 text-amber-400 font-bold">
+                                          #{qIdx + 1}
+                                        </span>
+                                        <span className="font-bold text-xs text-white truncate">
+                                          {qJob.part_name || "Part"}
+                                        </span>
+                                      </div>
+                                      <div className="text-[11px] text-slate-400 truncate mt-0.5" title={qJob.video_title || ""}>
+                                        {qJob.video_title || (qJob.target_langs ? qJob.target_langs.join(', ').toUpperCase() : 'Dubbing Task')}
+                                      </div>
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                      <span className="text-[11px] font-mono text-brand-400 font-bold block">
+                                        ~{qJob.estimated_duration_formatted || "3m"}
+                                      </span>
+                                      <span className="text-[10px] text-slate-500 uppercase font-semibold">
+                                        Queued
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                              <h2 className="text-base font-bold text-white">Conversion Engine Ready (Idle)</h2>
+                            </div>
+                            <p className="text-xs text-slate-400">
+                              Queue is empty. 0 jobs waiting. System is ready to convert new videos.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsAddVideoModalOpen(true)}
+                            className="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs transition"
+                          >
+                            Start New Video Conversion
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* KPI Stat Cards */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <div className="glass-card rounded-2xl p-5 border border-white/5">
+                        <div className="text-xs text-slate-400 uppercase font-semibold">Total Videos</div>
+                        <div className="text-3xl font-black text-white mt-1">{systemStats?.counts?.total_videos || 0}</div>
+                        <div className="text-[11px] text-slate-400 mt-1">Managed projects</div>
+                      </div>
+                      <div className="glass-card rounded-2xl p-5 border border-white/5">
+                        <div className="text-xs text-slate-400 uppercase font-semibold">Converted Parts</div>
+                        <div className="text-3xl font-black text-indigo-400 mt-1">{systemStats?.counts?.total_conversions || 0}</div>
+                        <div className="text-[11px] text-slate-400 mt-1">Completed conversions</div>
+                      </div>
+                      <div className="glass-card rounded-2xl p-5 border border-white/5">
+                        <div className="flex items-center justify-between text-slate-400 mb-1">
+                          <span className="text-xs uppercase font-semibold">Queue & Pipeline</span>
+                          {queueSummary.total_pending > 0 ? (
+                            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                          ) : (
+                            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                          )}
+                        </div>
+                        <div className="text-3xl font-black text-amber-400">
+                          {queueSummary.total_in_queue > 0 ? (
+                            <span>{queueSummary.total_in_queue} <span className="text-sm font-semibold text-slate-400">in queue</span></span>
+                          ) : queueSummary.total_processing > 0 ? (
+                            <span>{queueSummary.total_processing} <span className="text-sm font-semibold text-slate-400">running</span></span>
+                          ) : (
+                            <span className="text-emerald-400">0</span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-400 mt-1 flex items-center justify-between">
+                          <span>{queueSummary.total_pending > 0 ? `⏱ Est. ~${queueSummary.estimated_time_formatted}` : "Pipeline idle (ready)"}</span>
+                          {queueSummary.total_processing > 0 && queueSummary.total_in_queue > 0 && (
+                            <span className="text-amber-400 font-mono font-bold">({queueSummary.total_processing} running)</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="glass-card rounded-2xl p-5 border border-white/5">
+                        <div className="text-xs text-slate-400 uppercase font-semibold">Languages Converted</div>
+                        <div className="text-3xl font-black text-emerald-400 mt-1">{systemStats?.counts?.total_languages || 0}</div>
+                        <div className="text-[11px] text-slate-400 mt-1">Target languages dubbed</div>
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
 
               {/* Pie Charts */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1242,16 +1451,46 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      {conversions.map((conv, idx) => (
+                      {conversions.map((conv, idx) => {
+                        const isQueued = conv.status === "queued";
+                        const isProcessing = conv.status === "processing";
+                        const isCompleted = conv.status === "completed";
+                        const isFailed = conv.status === "failed";
+
+                        return (
                         <div key={conv.job_id || idx} className="rounded-xl p-5 bg-surface-900 border border-white/5 space-y-4">
                           <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                               <span className="font-bold text-sm text-white">{conv.part_name || "Full Video"}</span>
+                              {conv.time_range && (
+                                <span className="text-[10px] px-2 py-0.5 rounded bg-surface-800 text-slate-300 font-mono border border-white/5">
+                                  {conv.time_range}
+                                </span>
+                              )}
                               <span className="text-[10px] text-slate-400 font-mono">Job: {conv.job_id}</span>
                             </div>
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 uppercase">
-                              {conv.status || "Completed"}
-                            </span>
+                            {isQueued && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 uppercase flex items-center gap-1">
+                                <span>⏳</span>
+                                <span>Queued</span>
+                              </span>
+                            )}
+                            {isProcessing && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 uppercase flex items-center gap-1 animate-pulse">
+                                <span>⚡</span>
+                                <span>Processing ({Math.round((conv.progress || 0.05) * 100)}%)</span>
+                              </span>
+                            )}
+                            {isCompleted && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 uppercase">
+                                ✓ Completed
+                              </span>
+                            )}
+                            {isFailed && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20 uppercase">
+                                ✗ Failed
+                              </span>
+                            )}
                           </div>
 
                           {/* Language badges */}
@@ -1272,6 +1511,20 @@ export default function App() {
                                 src={conv.output_video_url}
                                 preload="metadata"
                               />
+                            </div>
+                          ) : isQueued ? (
+                            <div className="aspect-video bg-surface-950 rounded-xl flex flex-col items-center justify-center p-4 text-center border border-dashed border-amber-500/20">
+                              <div className="text-2xl mb-1">⏳</div>
+                              <span className="text-xs font-bold text-amber-300">Queued in Pipeline</span>
+                              <span className="text-[11px] text-slate-400 mt-1">Waiting in queue. Processing will begin automatically.</span>
+                            </div>
+                          ) : isProcessing ? (
+                            <div className="aspect-video bg-surface-950 rounded-xl flex flex-col items-center justify-center p-4 text-center border border-brand-500/20">
+                              <span className="text-xs font-bold text-brand-300">Dubbing & Rendering Part...</span>
+                              <div className="w-3/4 bg-surface-900 rounded-full h-2 mt-2 overflow-hidden">
+                                <div className="bg-brand-500 h-2 rounded-full transition-all" style={{ width: `${Math.round((conv.progress || 0.05) * 100)}%` }}></div>
+                              </div>
+                              <span className="text-[10px] text-slate-400 font-mono mt-1">{Math.round((conv.progress || 0) * 100)}% complete</span>
                             </div>
                           ) : (
                             <div className="aspect-video bg-surface-950 rounded-xl flex items-center justify-center text-xs text-slate-500">
@@ -1311,7 +1564,8 @@ export default function App() {
                             </button>
                           </div>
                         </div>
-                      ))}
+                      );
+                    })}
                     </div>
                   )}
                 </div>

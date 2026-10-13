@@ -12,8 +12,9 @@ import uuid
 import time
 import shutil
 import asyncio
+import re
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import (
@@ -56,14 +57,44 @@ BASE_DIR = Path(__file__).parent.resolve()
 UPLOAD_DIR = BASE_DIR / "workspace_api" / "uploads"
 JOBS_DIR = BASE_DIR / "workspace_api" / "jobs"
 STATIC_DIR = BASE_DIR / "static"
+VIDEOS_CACHE_DIR = BASE_DIR / "workspace_api" / "videos_cache"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
+VIDEOS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def extract_youtube_id(url: Optional[str]) -> Optional[str]:
+    """Extracts standard 11-character YouTube video ID from various URL formats."""
+    if not url:
+        return None
+    url = url.strip()
+    patterns = [
+        r"(?:v=|\/v\/|embed\/|shorts\/|youtu\.be\/|\/e\/|watch\?v=)([a-zA-Z0-9_-]{11})",
+        r"^[a-zA-Z0-9_-]{11}$"
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, url)
+        if m:
+            return m.group(1) if m.groups() else m.group(0)
+    if "youtu.be/" in url:
+        return url.split("youtu.be/")[-1].split("?")[0].split("&")[0]
+    if "v=" in url:
+        return url.split("v=")[-1].split("&")[0].split("?")[0]
+    return None
+
 
 import db
 
 # Thread pool for CPU/GPU intensive background dubbing tasks
 executor = ThreadPoolExecutor(max_workers=2)
+
+class JobCancelledException(Exception):
+    """Raised when a dubbing job is cancelled by the user."""
+    pass
+
+# Active cancelled job IDs to abort immediately
+CANCELLED_JOBS: Set[str] = set()
 
 # Persistent databases for jobs and videos
 jobs_db, videos_db = db.load_databases(JOBS_DIR, BASE_DIR / "workspace_api")
@@ -308,11 +339,21 @@ def run_dubbing_job_sync(
     if not job:
         return
 
+    if job_id in CANCELLED_JOBS or job.get("is_cancelled") or job.get("status") == "cancelled":
+        logger.info(f"Job {job_id} was cancelled before starting. Exiting worker.")
+        job["status"] = "cancelled"
+        job["current_step"] = "Cancelled by user"
+        db.update_video_on_job_progress(job_id, "cancelled", 0.0, videos_db, BASE_DIR / "workspace_api", jobs_db)
+        return
+
     job["status"] = "processing"
+    job["started_at"] = time.time()
     job_folder = JOBS_DIR / job_id
     job_folder.mkdir(parents=True, exist_ok=True)
 
     def progress_callback(progress_float: float, step_msg: str):
+        if job_id in CANCELLED_JOBS or job.get("is_cancelled") or job.get("status") == "cancelled":
+            raise JobCancelledException(f"Job {job_id} cancelled by user")
         job["progress"] = round(progress_float, 2)
         job["current_step"] = step_msg
         log_entry = f"[{time.strftime('%H:%M:%S')}] {step_msg}"
@@ -325,14 +366,55 @@ def run_dubbing_job_sync(
         })
 
     try:
-        # Download from YouTube if URL was provided
+        # Download from YouTube if URL was provided (cached to avoid duplicate downloads across parts)
         if not video_path and job.get("youtube_url"):
-            progress_callback(0.02, "Step 0 of 5: Downloading video from YouTube via yt-dlp...")
-            video_path = YouTubeDownloader.download(
-                job["youtube_url"],
-                job_folder,
-                progress_callback=progress_callback
-            )
+            yt_url = job["youtube_url"].strip()
+            yt_id = extract_youtube_id(yt_url)
+
+            # Check if source video is already cached to avoid duplicate downloads across parts
+            cached_source = None
+            if yt_id:
+                candidate = VIDEOS_CACHE_DIR / f"{yt_id}.mp4"
+                if candidate.exists() and candidate.stat().st_size > 100000:
+                    cached_source = candidate
+                else:
+                    ytd_candidate = BASE_DIR / "workspace_api" / "ytd_downloads" / f"{yt_id}.mp4"
+                    if ytd_candidate.exists() and ytd_candidate.stat().st_size > 100000:
+                        cached_source = ytd_candidate
+
+            if cached_source:
+                logger.info(f"Reusing cached source video for job {job_id}: {cached_source}")
+                progress_callback(0.02, f"Reusing cached source video ({cached_source.name})...")
+                target_video = job_folder / cached_source.name
+                if not target_video.exists():
+                    try:
+                        shutil.copy2(cached_source, target_video)
+                        video_path = target_video
+                    except Exception:
+                        video_path = cached_source
+                else:
+                    video_path = target_video
+            else:
+                progress_callback(0.02, "Step 0 of 5: Downloading video from YouTube via yt-dlp...")
+                download_dest = VIDEOS_CACHE_DIR if yt_id else job_folder
+                downloaded_file = YouTubeDownloader.download(
+                    yt_url,
+                    download_dest,
+                    progress_callback=progress_callback
+                )
+                if yt_id and downloaded_file.exists():
+                    target_video = job_folder / downloaded_file.name
+                    if not target_video.exists():
+                        try:
+                            shutil.copy2(downloaded_file, target_video)
+                            video_path = target_video
+                        except Exception:
+                            video_path = downloaded_file
+                    else:
+                        video_path = target_video
+                else:
+                    video_path = downloaded_file
+
             job["input_video"] = str(video_path)
 
         if not video_path or not video_path.exists():
@@ -440,7 +522,35 @@ def run_dubbing_job_sync(
             }
         )
 
+    except JobCancelledException as e:
+        logger.info(f"Job {job_id} was successfully cancelled: {e}")
+        job["status"] = "cancelled"
+        job["is_cancelled"] = True
+        job["progress"] = 0.0
+        job["current_step"] = "Cancelled by user"
+        job["completed_at"] = time.time()
+        notify_ws_clients(job_id, {
+            "type": "cancelled",
+            "message": "Job cancelled by user"
+        })
+        db.update_video_on_job_progress(
+            job_id,
+            "cancelled",
+            0.0,
+            videos_db,
+            BASE_DIR / "workspace_api",
+            jobs_db
+        )
+
     except Exception as e:
+        if job_id in CANCELLED_JOBS or job.get("is_cancelled") or job.get("status") == "cancelled":
+            logger.info(f"Job {job_id} was cancelled during error: {e}")
+            job["status"] = "cancelled"
+            job["is_cancelled"] = True
+            job["current_step"] = "Cancelled by user"
+            db.update_video_on_job_progress(job_id, "cancelled", 0.0, videos_db, BASE_DIR / "workspace_api", jobs_db)
+            return
+
         logger.exception(f"Job {job_id} encountered an error: {e}")
         job["status"] = "failed"
         job["error"] = str(e)
@@ -534,6 +644,7 @@ class CreateVideoRequest(BaseModel):
     title: str
     youtube_url: str
     description: Optional[str] = None
+    duration_seconds: Optional[float] = None
 
 
 class UpdateVideoRequest(BaseModel):
@@ -551,21 +662,39 @@ def list_videos():
 
 @app.post("/api/videos", status_code=status.HTTP_201_CREATED, tags=["Videos"])
 def create_video(req: CreateVideoRequest):
-    """Creates a new video project entry."""
-    clean_url = req.youtube_url.strip()
-    yt_id = clean_url.split("v=")[-1].split("&")[0].split("youtu.be/")[-1] if clean_url else uuid.uuid4().hex[:8]
-    vid_id = f"vid_{yt_id}"
+    """Creates a new video project entry. Always starts fresh with 0 conversions."""
+    clean_url = req.youtube_url.strip() if req.youtube_url else ""
+    yt_id = extract_youtube_id(clean_url)
+    unique_suffix = uuid.uuid4().hex[:6]
+    vid_id = f"vid_{yt_id}_{unique_suffix}" if yt_id else f"vid_{unique_suffix}"
 
-    if vid_id in videos_db:
-        # If already exists, return existing
-        return videos_db[vid_id]
+    title = req.title.strip() if req.title else ""
+    duration_sec = req.duration_seconds
+    thumb_url = None
+
+    if clean_url:
+        try:
+            info = YouTubeDownloader.get_video_info(clean_url)
+            if not title and info.get("title"):
+                title = info.get("title")
+            if not duration_sec and info.get("duration_seconds"):
+                duration_sec = float(info.get("duration_seconds"))
+            thumb_url = info.get("thumbnail")
+        except Exception:
+            pass
+
+    if not title:
+        title = f"YouTube Video: {yt_id}" if yt_id else f"Video Project {unique_suffix}"
+    if not thumb_url and yt_id:
+        thumb_url = f"https://img.youtube.com/vi/{yt_id}/hqdefault.jpg"
 
     video_entry = {
         "id": vid_id,
-        "title": req.title.strip() or f"Video {yt_id}",
+        "title": title,
         "youtube_url": clean_url,
         "description": req.description.strip() if req.description else "",
-        "thumbnail_url": f"https://img.youtube.com/vi/{yt_id}/hqdefault.jpg" if ("youtube.com" in clean_url or "youtu.be" in clean_url) else None,
+        "thumbnail_url": thumb_url,
+        "duration_seconds": duration_sec,
         "created_at": time.time(),
         "updated_at": time.time(),
         "status": "draft",
@@ -848,6 +977,185 @@ async def create_dubbing_job(
         "is_multi_language": len(parsed_langs) > 1,
         "voice": voice,
         "created_at": jobs_db[job_id]["created_at"]
+    }
+
+
+class BatchDubbingPart(BaseModel):
+    part_name: str
+    start_seconds: float
+    duration_seconds: float
+    time_range: Optional[str] = None
+
+
+class BatchDubbingRequest(BaseModel):
+    video_id: str
+    youtube_url: Optional[str] = None
+    video_path: Optional[str] = None
+    target_lang: str = "es"
+    target_langs: Optional[str] = None
+    voice: Optional[str] = None
+    voice_gender: Optional[str] = None
+    whisper_model: str = "base"
+    translation_engine: str = "deep-translator"
+    voice_clone: bool = False
+    bg_volume: float = 0.80
+    vocals_volume: float = 1.00
+    speed_cap: float = 1.15
+    enable_watermark: bool = False
+    watermark_text: Optional[str] = None
+    watermark_interval: float = 3.0
+    watermark_opacity: float = 0.40
+    gemini_api_key: Optional[str] = None
+    parts: List[BatchDubbingPart]
+
+
+@app.post("/api/dub/batch", status_code=status.HTTP_202_ACCEPTED, tags=["Dubbing"])
+async def create_batch_dubbing_jobs(req: BatchDubbingRequest):
+    """
+    Submits multiple split parts to the background queue at once for a video project.
+    Allows dubbing all parts sequentially in queue without manual step-by-step submission.
+    """
+    if not req.parts:
+        raise HTTPException(status_code=400, detail="No parts provided to queue.")
+
+    resolved_video_id = req.video_id
+    clean_yt_url = req.youtube_url.strip() if req.youtube_url and req.youtube_url.strip() else None
+
+    # Parse and validate target languages
+    if req.target_langs and req.target_langs.strip():
+        parsed_langs = [l.strip().lower() for l in req.target_langs.split(",") if l.strip()]
+    else:
+        parsed_langs = [req.target_lang.strip().lower()]
+    if not parsed_langs:
+        parsed_langs = [req.target_lang.strip().lower()]
+    parsed_langs = list(dict.fromkeys(parsed_langs))
+    primary_lang = parsed_langs[0]
+
+    voice = req.voice
+    if not voice:
+        lang_data = SUPPORTED_VOICES.get(primary_lang, SUPPORTED_VOICES.get("es", {}))
+        voices_list = lang_data.get("voices", [])
+        if req.voice_gender and voices_list:
+            matched = [v["id"] for v in voices_list if v.get("gender", "").lower() == req.voice_gender.lower()]
+            voice = matched[0] if matched else voices_list[0]["id"]
+        elif voices_list:
+            voice = voices_list[0]["id"]
+        else:
+            voice = "es-ES-AlvaroNeural"
+
+    tts_engine = "xtts" if req.voice_clone else "edge-tts"
+    clean_wm_text = req.watermark_text.strip() if req.watermark_text and req.watermark_text.strip() else None
+    has_watermark = bool(req.enable_watermark and clean_wm_text)
+    clean_gemini_key = req.gemini_api_key.strip() if req.gemini_api_key and req.gemini_api_key.strip() else None
+
+    def fmt_time(sec: float) -> str:
+        h = int(sec // 3600)
+        m = int((sec % 3600) // 60)
+        s = int(sec % 60)
+        return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+
+    queued_jobs = []
+
+    for part in req.parts:
+        job_id = uuid.uuid4().hex[:12]
+        time_range = part.time_range or f"{fmt_time(part.start_seconds)} - {fmt_time(part.start_seconds + part.duration_seconds)}"
+
+        jobs_db[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "progress": 0.0,
+            "current_step": f"Queued in batch pipeline for {part.part_name}",
+            "logs": [f"[{time.strftime('%H:%M:%S')}] Job queued in batch: {part.part_name} ({time_range})"],
+            "target_lang": primary_lang,
+            "target_langs": parsed_langs,
+            "is_multi_language": len(parsed_langs) > 1,
+            "voice": voice,
+            "created_at": time.time(),
+            "completed_at": None,
+            "error": None,
+            "youtube_url": clean_yt_url,
+            "input_video": str(Path(req.video_path).resolve()) if req.video_path else None,
+            "output_video_path": None,
+            "result": None,
+            "languages": None,
+            "zip_url": None,
+            "duration": part.duration_seconds,
+            "segment_count": None,
+            "part_name": part.part_name,
+            "voice_gender": req.voice_gender,
+            "speed_cap": float(req.speed_cap),
+            "start_seconds": part.start_seconds,
+            "duration_seconds": part.duration_seconds,
+            "enable_watermark": has_watermark,
+            "watermark_text": clean_wm_text,
+            "watermark_interval": float(req.watermark_interval),
+            "watermark_opacity": float(req.watermark_opacity),
+            "gemini_api_key": clean_gemini_key,
+            "is_shorts_mode": False,
+            "shorts_count": 3,
+            "short_duration": 45.0,
+            "shorts_aspect_ratio": "9:16",
+            "selected_moment_index": None,
+            "shorts": None,
+            "metadata": None,
+            "thumbnail": None,
+            "thumbnail_url": None,
+            "video_id": resolved_video_id,
+        }
+
+        # Link job to video project
+        db.link_job_to_video(
+            resolved_video_id,
+            job_id,
+            jobs_db[job_id],
+            videos_db,
+            BASE_DIR / "workspace_api",
+            jobs_db
+        )
+
+        # Dispatch to thread pool executor asynchronously
+        executor.submit(
+            run_dubbing_job_sync,
+            job_id,
+            Path(req.video_path).resolve() if req.video_path else None,
+            primary_lang,
+            voice,
+            req.whisper_model,
+            req.translation_engine,
+            tts_engine,
+            req.voice_clone,
+            req.bg_volume,
+            req.vocals_volume,
+            part.start_seconds,
+            part.duration_seconds,
+            part.part_name,
+            parsed_langs,
+            float(req.speed_cap),
+            has_watermark,
+            clean_wm_text,
+            float(req.watermark_interval),
+            float(req.watermark_opacity),
+            clean_gemini_key,
+            False,
+            3,
+            45.0,
+            "9:16",
+            None
+        )
+
+        queued_jobs.append({
+            "job_id": job_id,
+            "part_name": part.part_name,
+            "time_range": time_range,
+            "duration_seconds": part.duration_seconds
+        })
+
+    return {
+        "status": "queued",
+        "video_id": resolved_video_id,
+        "count": len(queued_jobs),
+        "message": f"Successfully queued {len(queued_jobs)} parts for background processing.",
+        "jobs": queued_jobs
     }
 
 
@@ -1413,9 +1721,72 @@ def get_audio_stem(job_id: str, stem_name: str):
     return FileResponse(path=file_p, media_type="audio/wav", filename=file_p.name)
 
 
+@app.post("/api/jobs/{job_id}/cancel", tags=["Dubbing"])
+def cancel_job_endpoint(job_id: str):
+    """Cancels an active or queued dubbing job, immediately aborting execution."""
+    CANCELLED_JOBS.add(job_id)
+    job = jobs_db.get(job_id)
+    was_status = "unknown"
+    if job:
+        was_status = job.get("status", "unknown")
+        job["status"] = "cancelled"
+        job["is_cancelled"] = True
+        job["current_step"] = "Cancelled by user"
+        job["progress"] = 0.0
+        job["completed_at"] = time.time()
+
+    # Update conversion status in video project
+    db.update_video_on_job_progress(
+        job_id,
+        "cancelled",
+        0.0,
+        videos_db,
+        BASE_DIR / "workspace_api",
+        jobs_db
+    )
+
+    notify_ws_clients(job_id, {
+        "type": "cancelled",
+        "message": "Job cancelled by user"
+    })
+
+    db.save_databases(BASE_DIR / "workspace_api", jobs_db, videos_db)
+    return {"status": "cancelled", "job_id": job_id, "previous_status": was_status}
+
+
+@app.post("/api/queue/cancel-all", tags=["Dubbing"])
+def cancel_all_queue_endpoint():
+    """Cancels all currently queued and processing dubbing jobs."""
+    cancelled_ids = []
+    for job_id, job in list(jobs_db.items()):
+        st = job.get("status")
+        if st in ["queued", "processing"]:
+            CANCELLED_JOBS.add(job_id)
+            job["status"] = "cancelled"
+            job["is_cancelled"] = True
+            job["current_step"] = "Cancelled by user"
+            cancelled_ids.append(job_id)
+            db.update_video_on_job_progress(
+                job_id,
+                "cancelled",
+                0.0,
+                videos_db,
+                BASE_DIR / "workspace_api",
+                jobs_db
+            )
+            notify_ws_clients(job_id, {
+                "type": "cancelled",
+                "message": "All jobs cancelled by user"
+            })
+
+    db.save_databases(BASE_DIR / "workspace_api", jobs_db, videos_db)
+    return {"status": "cancelled", "cancelled_count": len(cancelled_ids), "job_ids": cancelled_ids}
+
+
 @app.delete("/api/jobs/{job_id}", tags=["Dubbing"])
 def delete_job(job_id: str):
     """Deletes temporary files, removes job from registry and video project conversions, and saves DB."""
+    CANCELLED_JOBS.add(job_id)
     job = jobs_db.pop(job_id, None)
 
     # Remove conversion from any video's conversions in videos_db
