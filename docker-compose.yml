@@ -15,6 +15,12 @@ services:
     volumes:
       # Persistent storage: videos database, conversion jobs, and files remain safe on host disk
       - ./workspace_api:/app/workspace_api
+      # Live application code & static assets
+      - ./api.py:/app/api.py
+      - ./pipeline.py:/app/pipeline.py
+      - ./ytd.py:/app/ytd.py
+      - ./db.py:/app/db.py
+      - ./static:/app/static
       # Environment credentials
       - ./.env:/app/.env:ro
     # Log rotation prevents container logs from filling VM disk space

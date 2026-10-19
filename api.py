@@ -662,10 +662,11 @@ def get_system_stats_endpoint():
 
 
 class CreateVideoRequest(BaseModel):
-    title: str
-    youtube_url: str
+    title: Optional[str] = None
+    youtube_url: Optional[str] = ""
     description: Optional[str] = None
     duration_seconds: Optional[float] = None
+    source_type: Optional[str] = "youtube"
 
 
 class UpdateVideoRequest(BaseModel):
@@ -716,6 +717,10 @@ def create_video(req: CreateVideoRequest):
         "description": req.description.strip() if req.description else "",
         "thumbnail_url": thumb_url,
         "duration_seconds": duration_sec,
+        "source_type": req.source_type or ("youtube" if clean_url else "upload"),
+        "source_file": None,
+        "source_file_name": None,
+        "source_file_size": 0,
         "created_at": time.time(),
         "updated_at": time.time(),
         "status": "draft",
@@ -725,6 +730,123 @@ def create_video(req: CreateVideoRequest):
     videos_db[vid_id] = video_entry
     db.save_databases(BASE_DIR / "workspace_api", jobs_db, videos_db)
     return video_entry
+
+
+@app.post("/api/videos/upload", status_code=status.HTTP_201_CREATED, tags=["Videos"])
+async def create_video_from_upload(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    description: Optional[str] = Form(None)
+):
+    """Creates a new video project directly by uploading a local video file (skips YouTube)."""
+    unique_suffix = uuid.uuid4().hex[:8]
+    vid_id = f"vid_upload_{unique_suffix}"
+
+    saved_path = UPLOAD_DIR / f"{vid_id}_{file.filename}"
+    with open(saved_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    duration_sec = None
+    try:
+        from pipeline import VideoSegmenter
+        duration_sec = VideoSegmenter.get_duration(saved_path)
+    except Exception as e:
+        logger.warning(f"Could not extract duration for {saved_path}: {e}")
+
+    thumb_path = UPLOAD_DIR / f"{vid_id}_thumb.jpg"
+    thumb_url = None
+    try:
+        cmd = ["ffmpeg", "-y", "-ss", "00:00:01", "-i", str(saved_path), "-vframes", "1", "-q:v", "2", str(thumb_path)]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        if thumb_path.exists() and thumb_path.stat().st_size > 500:
+            thumb_url = f"/api/videos/{vid_id}/thumbnail"
+    except Exception as e:
+        logger.warning(f"Could not generate thumbnail for {saved_path}: {e}")
+
+    clean_title = title.strip() if title and title.strip() else Path(file.filename).stem
+    video_entry = {
+        "id": vid_id,
+        "title": clean_title,
+        "youtube_url": "",
+        "description": description.strip() if description else "",
+        "thumbnail_url": thumb_url,
+        "duration_seconds": duration_sec,
+        "source_file": str(saved_path),
+        "source_file_name": file.filename,
+        "source_file_size": saved_path.stat().st_size if saved_path.exists() else 0,
+        "source_type": "upload",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "status": "draft",
+        "conversions": [],
+        "languages": []
+    }
+    videos_db[vid_id] = video_entry
+    db.save_databases(BASE_DIR / "workspace_api", jobs_db, videos_db)
+    return video_entry
+
+
+@app.post("/api/videos/{video_id}/upload-source", tags=["Videos"])
+async def upload_video_source(
+    video_id: str,
+    file: UploadFile = File(...)
+):
+    """Uploads or replaces the main source video file for a video project (skips YouTube)."""
+    vid = videos_db.get(video_id)
+    if not vid:
+        raise HTTPException(status_code=404, detail="Video project not found")
+
+    # Remove previous source file if it existed in uploads
+    old_source = vid.get("source_file")
+    if old_source:
+        old_p = Path(old_source)
+        if old_p.exists() and old_p.is_file() and UPLOAD_DIR in old_p.parents:
+            try:
+                old_p.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    saved_path = UPLOAD_DIR / f"{video_id}_{file.filename}"
+    with open(saved_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    duration_sec = None
+    try:
+        from pipeline import VideoSegmenter
+        duration_sec = VideoSegmenter.get_duration(saved_path)
+    except Exception as e:
+        logger.warning(f"Could not extract duration for {saved_path}: {e}")
+
+    thumb_path = UPLOAD_DIR / f"{video_id}_thumb.jpg"
+    try:
+        cmd = ["ffmpeg", "-y", "-ss", "00:00:01", "-i", str(saved_path), "-vframes", "1", "-q:v", "2", str(thumb_path)]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        if thumb_path.exists() and thumb_path.stat().st_size > 500:
+            vid["thumbnail_url"] = f"/api/videos/{video_id}/thumbnail"
+    except Exception as e:
+        logger.warning(f"Could not generate thumbnail for {saved_path}: {e}")
+
+    vid["source_file"] = str(saved_path)
+    vid["source_file_name"] = file.filename
+    vid["source_file_size"] = saved_path.stat().st_size if saved_path.exists() else 0
+    vid["source_type"] = "upload"
+    if duration_sec and duration_sec > 0:
+        vid["duration_seconds"] = duration_sec
+    if not vid.get("title") or vid["title"].startswith("YouTube Video:") or vid["title"].startswith("Video Project"):
+        vid["title"] = Path(file.filename).stem
+    vid["updated_at"] = time.time()
+
+    db.save_databases(BASE_DIR / "workspace_api", jobs_db, videos_db)
+    return vid
+
+
+@app.get("/api/videos/{video_id}/thumbnail", tags=["Videos"])
+def get_video_thumbnail(video_id: str):
+    """Returns thumbnail image for an uploaded video project."""
+    thumb_path = UPLOAD_DIR / f"{video_id}_thumb.jpg"
+    if thumb_path.exists():
+        return FileResponse(path=thumb_path, media_type="image/jpeg", filename=f"{video_id}_thumb.jpg")
+    raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
 @app.get("/api/videos/{video_id}", tags=["Videos"])
@@ -755,12 +877,35 @@ def update_video(video_id: str, req: UpdateVideoRequest):
 
 @app.delete("/api/videos/{video_id}", tags=["Videos"])
 def delete_video(video_id: str):
-    """Deletes a video project along with its converted parts and media files."""
+    """Deletes a video project along with its main video file, converted parts, and all media files from disk."""
     vid = videos_db.pop(video_id, None)
     if not vid:
         raise HTTPException(status_code=404, detail="Video project not found")
 
-    # Clean up associated jobs and files from disk
+    deleted_count = 0
+
+    # 1. Purge explicitly registered source video file
+    source_file = vid.get("source_file")
+    if source_file:
+        p = Path(source_file)
+        if p.exists() and p.is_file():
+            try:
+                p.unlink(missing_ok=True)
+                deleted_count += 1
+                logger.info(f"Deleted source video file: {p}")
+            except Exception as e:
+                logger.warning(f"Could not delete source file {p}: {e}")
+
+    # 2. Purge local thumbnail file if present
+    thumb_file = UPLOAD_DIR / f"{video_id}_thumb.jpg"
+    if thumb_file.exists():
+        try:
+            thumb_file.unlink(missing_ok=True)
+            deleted_count += 1
+        except Exception:
+            pass
+
+    # 3. Collect associated jobs
     job_ids_to_remove = set()
     for conv in vid.get("conversions", []):
         j_id = conv.get("job_id")
@@ -772,14 +917,68 @@ def delete_video(video_id: str):
         if j_data.get("video_base_id") == vid_base or j_data.get("video_id") == video_id:
             job_ids_to_remove.add(j_id)
 
+    # 4. Clean up input videos recorded in the jobs and job directories
     for j_id in job_ids_to_remove:
+        j_data = jobs_db.get(j_id)
+        if j_data:
+            inp = j_data.get("input_video")
+            if inp:
+                inp_p = Path(inp)
+                if inp_p.exists() and inp_p.is_file():
+                    try:
+                        inp_p.unlink(missing_ok=True)
+                        deleted_count += 1
+                    except Exception:
+                        pass
+        CANCELLED_JOBS.add(j_id)
         jobs_db.pop(j_id, None)
         job_dir = JOBS_DIR / j_id
         if job_dir.exists():
             shutil.rmtree(job_dir, ignore_errors=True)
+            deleted_count += 1
+
+    # 5. Clean up any uploaded files matching video_id, vid_base, or j_id in UPLOAD_DIR
+    for pattern in [f"{video_id}*", f"{vid_base}*"]:
+        for f in UPLOAD_DIR.glob(pattern):
+            if f.is_file():
+                try:
+                    f.unlink(missing_ok=True)
+                    deleted_count += 1
+                except Exception:
+                    pass
+    for j_id in job_ids_to_remove:
+        for f in UPLOAD_DIR.glob(f"{j_id}*"):
+            if f.is_file():
+                try:
+                    f.unlink(missing_ok=True)
+                    deleted_count += 1
+                except Exception:
+                    pass
+
+    # 6. Clean up any cached video files in VIDEOS_CACHE_DIR and ytd_downloads
+    clean_yt = vid.get("youtube_url")
+    yt_id = extract_youtube_id(clean_yt) if clean_yt else None
+    for target_id in [yt_id, vid_base, video_id]:
+        if target_id:
+            for f in VIDEOS_CACHE_DIR.glob(f"{target_id}*"):
+                if f.is_file():
+                    try:
+                        f.unlink(missing_ok=True)
+                        deleted_count += 1
+                    except Exception:
+                        pass
+            ytd_dir = BASE_DIR / "workspace_api" / "ytd_downloads"
+            if ytd_dir.exists():
+                for f in ytd_dir.glob(f"{target_id}*"):
+                    if f.is_file():
+                        try:
+                            f.unlink(missing_ok=True)
+                            deleted_count += 1
+                        except Exception:
+                            pass
 
     db.save_databases(BASE_DIR / "workspace_api", jobs_db, videos_db)
-    return {"status": "deleted", "video_id": video_id}
+    return {"status": "deleted", "video_id": video_id, "deleted_items": deleted_count}
 
 
 class VideoInfoRequest(BaseModel):
@@ -1062,19 +1261,39 @@ async def create_dubbing_job(
     if clean_yt_url:
         pass
     elif video_file and video_file.filename:
-        saved_video_path = UPLOAD_DIR / f"{job_id}_{video_file.filename}"
+        saved_video_path = UPLOAD_DIR / f"{resolved_video_id}_{video_file.filename}"
         with open(saved_video_path, "wb") as buffer:
             shutil.copyfileobj(video_file.file, buffer)
         final_input_path = saved_video_path
+        if resolved_video_id and resolved_video_id in videos_db:
+            videos_db[resolved_video_id]["source_file"] = str(saved_video_path)
+            videos_db[resolved_video_id]["source_file_name"] = video_file.filename
+            videos_db[resolved_video_id]["source_file_size"] = saved_video_path.stat().st_size
+            videos_db[resolved_video_id]["source_type"] = "upload"
+            try:
+                from pipeline import VideoSegmenter
+                d = VideoSegmenter.get_duration(saved_video_path)
+                if d > 0:
+                    videos_db[resolved_video_id]["duration_seconds"] = d
+                    if not duration_seconds:
+                        duration_seconds = d
+            except Exception:
+                pass
+            db.save_databases(BASE_DIR / "workspace_api", jobs_db, videos_db)
     elif video_path:
         local_p = Path(video_path).resolve()
         if not local_p.exists():
             raise HTTPException(status_code=400, detail=f"Local video path does not exist: {video_path}")
         final_input_path = local_p
+    elif resolved_video_id and resolved_video_id in videos_db and videos_db[resolved_video_id].get("source_file"):
+        local_p = Path(videos_db[resolved_video_id]["source_file"]).resolve()
+        if not local_p.exists():
+            raise HTTPException(status_code=400, detail=f"Attached source video not found on disk: {local_p}")
+        final_input_path = local_p
     else:
         raise HTTPException(
             status_code=400,
-            detail="Must provide either 'youtube_url', 'video_file' upload, or 'video_path' string."
+            detail="Must provide either 'youtube_url', upload a 'video_file', or have an uploaded video attached to this project."
         )
 
     # Parse and validate target languages
@@ -1242,6 +1461,23 @@ async def create_batch_dubbing_jobs(req: BatchDubbingRequest):
     resolved_video_id = req.video_id
     clean_yt_url = req.youtube_url.strip() if req.youtube_url and req.youtube_url.strip() else None
 
+    # Resolve video source path
+    resolved_video_path = None
+    if req.video_path:
+        local_p = Path(req.video_path).resolve()
+        if local_p.exists():
+            resolved_video_path = local_p
+    elif resolved_video_id and resolved_video_id in videos_db and videos_db[resolved_video_id].get("source_file"):
+        src_p = Path(videos_db[resolved_video_id]["source_file"]).resolve()
+        if src_p.exists():
+            resolved_video_path = src_p
+
+    if not clean_yt_url and not resolved_video_path:
+        raise HTTPException(
+            status_code=400,
+            detail="Must provide either YouTube URL or an uploaded video file to split into parts."
+        )
+
     # Parse and validate target languages
     if req.target_langs and req.target_langs.strip():
         parsed_langs = [l.strip().lower() for l in req.target_langs.split(",") if l.strip()]
@@ -1295,7 +1531,7 @@ async def create_batch_dubbing_jobs(req: BatchDubbingRequest):
             "completed_at": None,
             "error": None,
             "youtube_url": clean_yt_url,
-            "input_video": str(Path(req.video_path).resolve()) if req.video_path else None,
+            "input_video": str(resolved_video_path) if resolved_video_path else None,
             "output_video_path": None,
             "result": None,
             "languages": None,
@@ -1338,7 +1574,7 @@ async def create_batch_dubbing_jobs(req: BatchDubbingRequest):
         executor.submit(
             run_dubbing_job_sync,
             job_id,
-            Path(req.video_path).resolve() if req.video_path else None,
+            resolved_video_path,
             primary_lang,
             voice,
             req.whisper_model,
@@ -2234,6 +2470,125 @@ def delete_ytd_video(video_id: int):
         return ytd.delete_video(video_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Video not found")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# Direct YouTube Video Downloader Endpoints
+# ============================================================================
+
+class DirectAddVideoRequest(BaseModel):
+    url: str
+    title: Optional[str] = None
+    auto_download: Optional[bool] = True
+
+
+class DirectCheckRequest(BaseModel):
+    url: str
+
+
+@app.get("/api/direct/stats", tags=["Direct Downloads"])
+def get_direct_stats_endpoint():
+    """Returns statistics for direct video downloads."""
+    return ytd.get_direct_stats()
+
+
+@app.get("/api/direct/videos", tags=["Direct Downloads"])
+def list_direct_videos(
+    search: str = "",
+    status: str = "all",
+    limit: int = 250,
+    offset: int = 0
+):
+    """Lists direct videos with optional search query and status filtering."""
+    return ytd.get_all_direct_videos(search=search, status_filter=status, limit=limit, offset=offset)
+
+
+@app.post("/api/direct/videos", status_code=status.HTTP_201_CREATED, tags=["Direct Downloads"])
+def add_direct_video_endpoint(req: DirectAddVideoRequest):
+    """Adds a direct YouTube video link and optionally triggers download."""
+    try:
+        return ytd.add_direct_video(req.url, title=req.title, auto_download=bool(req.auto_download))
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/direct/videos/check", tags=["Direct Downloads"])
+def check_direct_video_endpoint(req: DirectCheckRequest):
+    """Checks if a YouTube video URL or ID is already saved in direct downloads."""
+    return ytd.check_direct_video_exists(req.url)
+
+
+@app.post("/api/direct/videos/{video_id}/download", tags=["Direct Downloads"])
+def start_direct_video_download(video_id: int):
+    """Starts or restarts downloading a direct video."""
+    try:
+        return ytd.queue_direct_video_download(video_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Direct video record not found")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/direct/videos/{video_id}/status", tags=["Direct Downloads"])
+def get_direct_video_status(video_id: int):
+    """Returns the live download status of a direct video."""
+    v = ytd.get_direct_video_by_id(video_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="Direct video not found")
+    return {
+        "id": v["id"],
+        "is_downloaded": bool(v["is_downloaded"]),
+        "was_downloaded": bool(v.get("was_downloaded", 0)),
+        "status": v["download_status"],
+        "progress": v["download_progress"],
+        "download_file_name": v.get("download_file_name"),
+        "download_file_size": v.get("download_file_size"),
+        "error": v.get("download_error")
+    }
+
+
+@app.get("/api/direct/videos/{video_id}/file", tags=["Direct Downloads"])
+def download_direct_video_file(video_id: int):
+    """Serves the downloaded video file to the user's browser for saving."""
+    v = ytd.get_direct_video_by_id(video_id)
+    if not v or not v.get("download_path"):
+        raise HTTPException(status_code=404, detail="Video file not found or has been cleared to reduce storage")
+
+    p = Path(v["download_path"])
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Video file is missing from disk")
+
+    filename = v.get("download_file_name") or p.name
+    return FileResponse(
+        path=p,
+        media_type="video/mp4",
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+@app.delete("/api/direct/videos/{video_id}/video", tags=["Direct Downloads"])
+def delete_direct_video_file_only(video_id: int):
+    """Deletes ONLY the video file from disk to save storage, keeping the record intact."""
+    try:
+        return ytd.delete_direct_video_file_only(video_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Direct video not found")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/direct/videos/{video_id}", tags=["Direct Downloads"])
+def delete_direct_video_record(video_id: int):
+    """Permanently deletes the video record and its file."""
+    try:
+        return ytd.delete_direct_video_permanent(video_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Direct video not found")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -23,7 +23,11 @@ import {
   Youtube,
   Scissors,
   Square,
-  X
+  X,
+  Search,
+  HardDrive,
+  DownloadCloud,
+  AlertCircle
 } from 'lucide-react';
 
 // Dubbing Languages Metadata
@@ -568,6 +572,11 @@ export default function App() {
   const [editingChannel, setEditingChannel] = useState(null);
   const [downloadModalVideo, setDownloadModalVideo] = useState(null);
 
+  // Direct YouTube Downloader state
+  const [directVideos, setDirectVideos] = useState([]);
+  const [directStats, setDirectStats] = useState(null);
+  const [isLoadingDirect, setIsLoadingDirect] = useState(false);
+
   const [showCookieTools, setShowCookieTools] = useState(false);
   const [pastedCookies, setPastedCookies] = useState("");
   const [isSavingCookies, setIsSavingCookies] = useState(false);
@@ -697,22 +706,63 @@ export default function App() {
     }
   };
 
+  const fetchDirectVideos = async (search = "", status = "all") => {
+    setIsLoadingDirect(true);
+    try {
+      const q = new URLSearchParams();
+      if (search) q.append("search", search);
+      if (status && status !== "all") q.append("status", status);
+      const res = await fetch(`/api/direct/videos?${q.toString()}`);
+      if (res.ok) setDirectVideos(await res.json());
+    } catch (err) {
+      console.error("Direct videos fetch error:", err);
+    } finally {
+      setIsLoadingDirect(false);
+    }
+  };
+
+  const fetchDirectStats = async () => {
+    try {
+      const res = await fetch("/api/direct/stats");
+      if (res.ok) setDirectStats(await res.json());
+    } catch (err) {
+      console.error("Direct stats fetch error:", err);
+    }
+  };
+
   useEffect(() => {
     if (isAuthenticated) {
       fetchStats();
       fetchVideos();
       fetchYtdChannels();
       fetchYtdStats();
+      fetchDirectVideos();
+      fetchDirectStats();
       fetchYtAuthStatus();
       const isBusy = (systemStats?.counts?.active_jobs > 0) || (systemStats?.queue_summary?.total_pending > 0);
       const intervalMs = isBusy ? 3000 : 8000;
       const interval = setInterval(() => {
         fetchStats();
         fetchYtdStats();
+        fetchDirectStats();
       }, intervalMs);
       return () => clearInterval(interval);
     }
   }, [isAuthenticated, systemStats?.counts?.active_jobs, systemStats?.queue_summary?.total_pending]);
+
+  // Polling for active direct downloads
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const hasActive = (directVideos || []).some(v => ['queued', 'downloading'].includes(v.download_status));
+    if (!hasActive) return;
+
+    const interval = setInterval(() => {
+      fetchDirectVideos();
+      fetchDirectStats();
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [directVideos, isAuthenticated]);
 
   const handleLogout = () => {
     localStorage.removeItem("admin_auth");
@@ -867,6 +917,88 @@ export default function App() {
     return false;
   };
 
+  const handleAddDirectVideo = async (url, title = "", autoDownload = true) => {
+    try {
+      const res = await fetch("/api/direct/videos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, title, auto_download: autoDownload })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert("Error adding direct video: " + (data.detail || "Server error"));
+        return null;
+      }
+      fetchDirectVideos();
+      fetchDirectStats();
+      return data;
+    } catch (e) {
+      alert("Network error: " + e.message);
+      return null;
+    }
+  };
+
+  const handleDownloadDirectVideo = async (videoId) => {
+    try {
+      const res = await fetch(`/api/direct/videos/${videoId}/download`, { method: "POST" });
+      if (res.ok) {
+        fetchDirectVideos();
+        fetchDirectStats();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert("Failed to start download: " + (err.detail || "Server error"));
+      }
+    } catch (e) {
+      alert("Network error: " + e.message);
+    }
+  };
+
+  const handleDeleteDirectVideoFileOnly = async (videoId, title) => {
+    const confirm = window.confirm(
+      `Delete video file for "${title || 'this video'}" to reduce storage?\n\nThe record will stay saved so you know you already downloaded it.`
+    );
+    if (!confirm) return false;
+
+    try {
+      const res = await fetch(`/api/direct/videos/${videoId}/video`, { method: "DELETE" });
+      if (res.ok) {
+        fetchDirectVideos();
+        fetchDirectStats();
+        return true;
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert("Failed to delete video file: " + (err.detail || "Server error"));
+        return false;
+      }
+    } catch (e) {
+      alert("Network error: " + e.message);
+      return false;
+    }
+  };
+
+  const handleDeleteDirectVideoPermanent = async (videoId, title) => {
+    const confirm = window.confirm(
+      `Are you sure you want to PERMANENTLY delete "${title || 'this video'}" and its record from the database?`
+    );
+    if (!confirm) return false;
+
+    try {
+      const res = await fetch(`/api/direct/videos/${videoId}`, { method: "DELETE" });
+      if (res.ok) {
+        setDirectVideos(prev => prev.filter(v => v.id !== videoId));
+        fetchDirectStats();
+        return true;
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert("Failed to delete video record: " + (err.detail || "Server error"));
+        return false;
+      }
+    } catch (e) {
+      alert("Network error: " + e.message);
+      return false;
+    }
+  };
+
   if (!isAuthenticated) {
     return <LoginScreen onLoginSuccess={() => setIsAuthenticated(true)} />;
   }
@@ -927,6 +1059,20 @@ export default function App() {
                 </span>
               )}
             </button>
+
+            <button
+              type="button"
+              onClick={() => { setActiveTab("direct"); }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-semibold text-sm transition ${activeTab === 'direct' ? 'bg-gradient-to-r from-amber-600 to-orange-600 text-white shadow-lg shadow-amber-500/25' : 'text-slate-300 hover:bg-surface-850 hover:text-white'}`}
+            >
+              <DownloadCloud className="w-4 h-4" />
+              <span>Direct</span>
+              {directVideos.length > 0 && (
+                <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-black/30 text-slate-200">
+                  {directVideos.length}
+                </span>
+              )}
+            </button>
           </nav>
         </div>
 
@@ -983,7 +1129,7 @@ export default function App() {
             <span className="text-slate-400">Admin</span>
             <span className="text-slate-600">/</span>
             <span className="font-bold text-white capitalize">
-              {activeTab === 'video_details' ? 'Video Project Details' : activeTab === 'ytd_channel_details' ? 'Channel Videos' : activeTab === 'ytd' ? 'YouTube Downloader (YTD)' : activeTab}
+              {activeTab === 'video_details' ? 'Video Project Details' : activeTab === 'ytd_channel_details' ? 'Channel Videos' : activeTab === 'ytd' ? 'YouTube Downloader (YTD)' : activeTab === 'direct' ? 'Direct YouTube Downloader' : activeTab}
             </span>
           </div>
 
@@ -1010,6 +1156,18 @@ export default function App() {
               >
                 <ArrowLeft className="w-4 h-4" />
                 <span>Back to Channels</span>
+              </button>
+            ) : activeTab === 'direct' ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const el = document.getElementById("direct-url-input");
+                  if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth' }); }
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white font-bold text-xs transition shadow-md shadow-amber-500/20"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add YouTube Link</span>
               </button>
             ) : (
               <button
@@ -1905,6 +2063,7 @@ export default function App() {
               onEditChannel={(ch) => setEditingChannel(ch)}
               onDeleteChannel={handleDeleteChannel}
               onSyncChannel={handleSyncChannel}
+              onSwitchToDirect={() => setActiveTab("direct")}
             />
           )}
 
@@ -1915,6 +2074,20 @@ export default function App() {
               onDownloadVideo={(video) => setDownloadModalVideo(video)}
               onDeleteVideo={handleDeleteYtdVideo}
               onSyncChannel={handleSyncChannel}
+            />
+          )}
+
+          {activeTab === "direct" && (
+            <DirectDownloaderView
+              videos={directVideos}
+              stats={directStats}
+              isLoading={isLoadingDirect}
+              onRefresh={() => { fetchDirectVideos(); fetchDirectStats(); }}
+              onAddVideo={handleAddDirectVideo}
+              onDownloadVideo={handleDownloadDirectVideo}
+              onDeleteVideoFileOnly={handleDeleteDirectVideoFileOnly}
+              onDeleteVideoPermanent={handleDeleteDirectVideoPermanent}
+              onSwitchToChannels={() => { setActiveTab("ytd"); setSelectedChannelId(null); fetchYtdChannels(); }}
             />
           )}
         </div>
@@ -2152,7 +2325,8 @@ function YtdChannelsView({
   onOpenDetails,
   onEditChannel,
   onDeleteChannel,
-  onSyncChannel
+  onSyncChannel,
+  onSwitchToDirect
 }) {
   const [searchTerm, setSearchTerm] = useState("");
   const [syncingId, setSyncingId] = useState(null);
@@ -2186,7 +2360,18 @@ function YtdChannelsView({
             Track YouTube channels, sync published videos, download full MP4 files, slice long videos into 2/5/9 min series, or render vertical shorts.
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          {onSwitchToDirect && (
+            <button
+              type="button"
+              onClick={onSwitchToDirect}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold transition"
+              title="Switch to Direct Video Downloader"
+            >
+              <DownloadCloud className="w-3.5 h-3.5" />
+              <span>Direct Downloader</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={onRefresh}
@@ -3182,6 +3367,575 @@ function YtdDownloadModal({ video, onClose, onDownloadStarted }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// =========================================================================
+// Direct YouTube Video Downloader Component
+// =========================================================================
+function DirectDownloaderView({
+  videos,
+  stats,
+  isLoading,
+  onRefresh,
+  onAddVideo,
+  onDownloadVideo,
+  onDeleteVideoFileOnly,
+  onDeleteVideoPermanent,
+  onSwitchToChannels
+}) {
+  const [urlInput, setUrlInput] = useState("");
+  const [titleInput, setTitleInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [copiedId, setCopiedId] = useState(null);
+
+  const formatTimestamp = (ts) => {
+    if (!ts) return "";
+    try {
+      const d = new Date(ts * 1000);
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    } catch (e) {
+      return "";
+    }
+  };
+
+  const getYoutubeId = (val) => {
+    if (!val) return null;
+    const str = val.trim();
+    if (/^[a-zA-Z0-9_-]{11}$/.test(str)) return str;
+    const m = str.match(/(?:v=|\/v\/|youtu\.be\/|\/embed\/|\/shorts\/|\/live\/)([a-zA-Z0-9_-]{11})/);
+    if (m) return m[1];
+    const m2 = str.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+    if (m2) return m2[1];
+    return null;
+  };
+
+  const inputYtId = getYoutubeId(urlInput);
+  const existingVideo = inputYtId ? (videos || []).find(v => v.youtube_id === inputYtId || (v.url && v.url.includes(inputYtId))) : null;
+
+  const handleAdd = async (autoDownload = true) => {
+    if (!urlInput.trim()) {
+      alert("Please paste a valid YouTube video link.");
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const res = await onAddVideo(urlInput.trim(), titleInput.trim(), autoDownload);
+      if (res) {
+        setUrlInput("");
+        setTitleInput("");
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleCopyUrl = (url, id) => {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(url);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    }
+  };
+
+  const filteredVideos = (videos || []).filter(v => {
+    const q = searchQuery.toLowerCase().trim();
+    const matchesSearch = !q ||
+      (v.title || "").toLowerCase().includes(q) ||
+      (v.url || "").toLowerCase().includes(q) ||
+      (v.youtube_id || "").toLowerCase().includes(q) ||
+      (v.channel_name || "").toLowerCase().includes(q);
+
+    if (!matchesSearch) return false;
+
+    if (statusFilter === "downloaded") return Boolean(v.is_downloaded);
+    if (statusFilter === "file_deleted") return v.download_status === 'file_deleted' || (Boolean(v.was_downloaded) && !v.is_downloaded);
+    if (statusFilter === "active") return ['downloading', 'queued'].includes(v.download_status);
+    return true;
+  });
+
+  const onDiskCount = (videos || []).filter(v => Boolean(v.is_downloaded)).length;
+  const storageSavedCount = (videos || []).filter(v => v.download_status === 'file_deleted' || (Boolean(v.was_downloaded) && !v.is_downloaded)).length;
+  const activeCount = (videos || []).filter(v => ['downloading', 'queued'].includes(v.download_status)).length;
+
+  return (
+    <div className="space-y-6">
+      {/* Header Banner with Submenu Navigation */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-6 rounded-2xl glass-card border border-white/5 bg-gradient-to-r from-surface-900 via-surface-850 to-amber-950/20">
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="p-1.5 rounded-lg bg-amber-600/20 text-amber-400 border border-amber-500/30">
+              <DownloadCloud className="w-4 h-4" />
+            </span>
+            <span className="text-xs font-bold text-amber-400 uppercase tracking-widest">
+              Direct YouTube Video Downloader
+            </span>
+          </div>
+          <h2 className="text-2xl font-black text-white tracking-tight">Direct Video Downloads</h2>
+          <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+            Download videos directly from any YouTube link without adding an entire channel. Keep records to verify previously downloaded videos and free up disk storage with "Delete Video".
+          </p>
+        </div>
+
+        {/* Submenu switcher */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={onSwitchToChannels}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white text-xs font-semibold transition border border-white/10"
+          >
+            <Youtube className="w-3.5 h-3.5 text-red-400" />
+            <span>Connected Channels</span>
+          </button>
+          <div className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 text-white text-xs font-bold shadow-lg shadow-amber-500/25 flex items-center gap-2">
+            <DownloadCloud className="w-3.5 h-3.5" />
+            <span>Direct Downloader</span>
+          </div>
+          <button
+            type="button"
+            onClick={onRefresh}
+            className="p-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white transition border border-white/10"
+            title="Refresh list"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Metrics Bar */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="p-4 rounded-xl glass-panel border border-white/5">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Total Saved Records</span>
+          <div className="text-2xl font-black text-white mt-1">{stats?.total_records || (videos || []).length}</div>
+        </div>
+        <div className="p-4 rounded-xl glass-panel border border-white/5">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Ready on Disk</span>
+          <div className="text-2xl font-black text-emerald-400 mt-1">
+            {stats?.on_disk_count ?? onDiskCount} <span className="text-xs font-normal text-slate-400">({stats?.disk_mb || 0} MB)</span>
+          </div>
+        </div>
+        <div className="p-4 rounded-xl glass-panel border border-white/5">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Storage Saved</span>
+          <div className="text-2xl font-black text-amber-400 mt-1">
+            {stats?.storage_saved_count ?? storageSavedCount} <span className="text-xs font-normal text-slate-400">videos cleared</span>
+          </div>
+        </div>
+        <div className="p-4 rounded-xl glass-panel border border-white/5">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Active Downloads</span>
+          <div className="text-2xl font-black text-indigo-400 mt-1">{stats?.active_downloads ?? activeCount}</div>
+        </div>
+      </div>
+
+      {/* Add Direct Video Card */}
+      <div className="p-6 rounded-2xl glass-card border border-white/10 bg-surface-900/90 shadow-xl space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-bold text-white flex items-center gap-2">
+            <span>Add YouTube Link</span>
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-300 font-normal">
+              Direct MP4 Download
+            </span>
+          </h3>
+        </div>
+
+        <div className="space-y-3">
+          <div className="relative">
+            <input
+              id="direct-url-input"
+              type="text"
+              placeholder="Paste YouTube link (e.g. https://www.youtube.com/watch?v=... or https://youtu.be/... or Shorts)"
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.target.value)}
+              disabled={isSubmitting}
+              className="w-full px-4 py-3 rounded-xl bg-surface-950 border border-slate-700/80 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-500 transition shadow-inner"
+            />
+            {urlInput && (
+              <button
+                type="button"
+                onClick={() => setUrlInput("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+
+          {/* Optional Title input */}
+          <div className="flex flex-col sm:flex-row gap-3">
+            <input
+              type="text"
+              placeholder="Custom title (optional, fetched from YouTube automatically if empty)"
+              value={titleInput}
+              onChange={(e) => setTitleInput(e.target.value)}
+              disabled={isSubmitting}
+              className="flex-1 px-4 py-2.5 rounded-xl bg-surface-950 border border-slate-700/80 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-500 transition"
+            />
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={isSubmitting || !urlInput.trim()}
+                onClick={() => handleAdd(true)}
+                className={`flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white text-xs font-bold shadow-lg shadow-amber-500/25 transition whitespace-nowrap ${isSubmitting || !urlInput.trim() ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                {isSubmitting ? (
+                  <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                ) : (
+                  <Download className="w-3.5 h-3.5" />
+                )}
+                <span>Download Video</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isSubmitting || !urlInput.trim()}
+                onClick={() => handleAdd(false)}
+                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white text-xs font-semibold transition border border-white/10 whitespace-nowrap ${isSubmitting || !urlInput.trim() ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title="Save video link to record list without starting download right now"
+              >
+                <span>Save Link</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Real-Time Duplicate Warning Alert */}
+          {existingVideo && (
+            <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
+                <div>
+                  <div className="font-bold text-white flex items-center gap-2">
+                    <span>Notice: This video is already saved!</span>
+                    {existingVideo.is_downloaded ? (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        Ready on Disk ({existingVideo.file_size_mb} MB)
+                      </span>
+                    ) : (existingVideo.download_status === 'file_deleted' || (existingVideo.was_downloaded && !existingVideo.is_downloaded)) ? (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        Storage Saved (File Cleared)
+                      </span>
+                    ) : ['downloading', 'queued'].includes(existingVideo.download_status) ? (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                        Downloading ({existingVideo.download_progress}%)
+                      </span>
+                    ) : (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-500/20 text-slate-300 border border-slate-500/30">
+                        Saved Link
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-300 mt-0.5 truncate max-w-xl">
+                    "{existingVideo.title}" • Added {formatTimestamp(existingVideo.created_at)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery(existingVideo.youtube_id || existingVideo.title)}
+                  className="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-white text-[11px] font-semibold border border-white/10 transition"
+                >
+                  Find in List
+                </button>
+                {!existingVideo.is_downloaded && (
+                  <button
+                    type="button"
+                    onClick={() => onDownloadVideo(existingVideo.id)}
+                    className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-bold transition shadow"
+                  >
+                    Re-download
+                  </button>
+                )}
+                {existingVideo.is_downloaded && (
+                  <a
+                    href={`/api/direct/videos/${existingVideo.id}/file`}
+                    download
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition shadow inline-flex items-center gap-1"
+                  >
+                    <Download className="w-3 h-3" />
+                    <span>Save Video</span>
+                  </a>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Search Bar & Filter Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pt-2">
+        <div className="relative flex-1 max-w-lg">
+          <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            placeholder="Search saved videos by title, YouTube URL, or ID..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-surface-900 border border-slate-700/80 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-500 transition"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1"
+              title="Clear search"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
+        {/* Filter Pills */}
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          <button
+            type="button"
+            onClick={() => setStatusFilter("all")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition whitespace-nowrap ${statusFilter === 'all' ? 'bg-amber-600 text-white' : 'bg-surface-850 text-slate-400 hover:text-white border border-white/5'}`}
+          >
+            All ({(videos || []).length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("downloaded")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition whitespace-nowrap ${statusFilter === 'downloaded' ? 'bg-emerald-600 text-white' : 'bg-surface-850 text-slate-400 hover:text-white border border-white/5'}`}
+          >
+            Ready on Disk ({onDiskCount})
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("file_deleted")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition whitespace-nowrap ${statusFilter === 'file_deleted' ? 'bg-amber-600 text-white' : 'bg-surface-850 text-slate-400 hover:text-white border border-white/5'}`}
+            title="Video file deleted to reduce storage; record preserved"
+          >
+            Storage Saved ({storageSavedCount})
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("active")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition whitespace-nowrap ${statusFilter === 'active' ? 'bg-indigo-600 text-white' : 'bg-surface-850 text-slate-400 hover:text-white border border-white/5'}`}
+          >
+            Downloading ({activeCount})
+          </button>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+        <span>Showing {filteredVideos.length} of {(videos || []).length} saved YouTube videos</span>
+        {searchQuery && (
+          <span>Filtering by: <strong className="text-white">"{searchQuery}"</strong></span>
+        )}
+      </div>
+
+      {/* Videos List */}
+      {isLoading && (!videos || videos.length === 0) ? (
+        <div className="flex flex-col items-center justify-center p-16 text-slate-400">
+          <div className="w-8 h-8 border-2 border-amber-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+          <p className="text-xs">Loading direct videos...</p>
+        </div>
+      ) : filteredVideos.length === 0 ? (
+        <div className="glass-card rounded-2xl p-12 text-center border border-white/5 bg-surface-900/40">
+          <div className="w-12 h-12 rounded-2xl bg-surface-800 text-slate-400 flex items-center justify-center mx-auto mb-3">
+            <DownloadCloud className="w-6 h-6" />
+          </div>
+          <h4 className="text-sm font-bold text-white mb-1">
+            {searchQuery ? "No matching videos found" : "No direct videos added yet"}
+          </h4>
+          <p className="text-xs text-slate-400 max-w-md mx-auto mb-4">
+            {searchQuery
+              ? `No saved videos matched "${searchQuery}". Check the URL or clear your filter.`
+              : "Paste any YouTube video or shorts link above to start downloading or saving records."}
+          </p>
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="px-4 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-white text-xs font-semibold transition"
+            >
+              Clear Search Query
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {filteredVideos.map((video) => {
+            const isDownloaded = Boolean(video.is_downloaded);
+            const isFileDeleted = video.download_status === 'file_deleted' || (Boolean(video.was_downloaded) && !isDownloaded);
+            const isDownloading = ['downloading', 'queued'].includes(video.download_status);
+            const isError = video.download_status === 'error';
+
+            return (
+              <div
+                key={video.id}
+                className="p-4 rounded-2xl glass-card border border-white/5 bg-surface-900/60 hover:bg-surface-850/80 transition flex flex-col md:flex-row md:items-center justify-between gap-4"
+              >
+                {/* Left: Thumbnail & Details */}
+                <div className="flex items-start gap-4 min-w-0 flex-1">
+                  {/* Thumbnail */}
+                  <div className="relative w-32 h-20 rounded-xl overflow-hidden bg-black/40 flex-shrink-0 border border-white/5">
+                    {video.thumbnail ? (
+                      <img
+                        src={video.thumbnail}
+                        alt={video.title}
+                        className="w-full h-full object-cover"
+                        onError={(e) => { e.target.style.display = 'none'; }}
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-slate-500">
+                        <Youtube className="w-8 h-8" />
+                      </div>
+                    )}
+                    {video.duration > 0 && (
+                      <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono text-white">
+                        {formatYtdDuration(video.duration)}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Info */}
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <a
+                        href={video.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sm font-bold text-white hover:text-amber-400 transition truncate max-w-xl inline-flex items-center gap-1"
+                        title={video.title}
+                      >
+                        <span>{video.title}</span>
+                        <ExternalLink className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                      </a>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-[11px] text-slate-400 flex-wrap">
+                      {video.channel_name && (
+                        <span className="font-semibold text-slate-300">{video.channel_name}</span>
+                      )}
+                      {video.channel_name && <span>•</span>}
+                      <span className="font-mono text-slate-500">ID: {video.youtube_id}</span>
+                      <span>•</span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyUrl(video.url, video.id)}
+                        className="text-slate-400 hover:text-white transition inline-flex items-center gap-1"
+                        title="Copy YouTube URL"
+                      >
+                        {copiedId === video.id ? (
+                          <span className="text-emerald-400 font-semibold">✓ Copied URL</span>
+                        ) : (
+                          <span>Copy URL</span>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Status badge & timestamps */}
+                    <div className="flex items-center gap-2 pt-1 flex-wrap">
+                      {isDownloaded ? (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold inline-flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                          <span>Ready on Disk ({video.file_size_mb} MB)</span>
+                        </span>
+                      ) : isFileDeleted ? (
+                        <span
+                          className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold inline-flex items-center gap-1"
+                          title="Video file was deleted to free up disk space. Record is retained to confirm previous download."
+                        >
+                          <HardDrive className="w-3 h-3 text-amber-400" />
+                          <span>Storage Saved (File Cleared • Record Kept)</span>
+                        </span>
+                      ) : isDownloading ? (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-semibold inline-flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
+                          <span>Downloading ({video.download_progress || 0}%)</span>
+                        </span>
+                      ) : isError ? (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30 font-semibold">
+                          Failed ({video.download_error || "Download error"})
+                        </span>
+                      ) : (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-500/20 text-slate-300 border border-slate-500/30">
+                          Saved Link
+                        </span>
+                      )}
+
+                      <span className="text-[10px] text-slate-500">
+                        {isDownloaded && video.downloaded_at
+                          ? `Downloaded ${formatTimestamp(video.downloaded_at)}`
+                          : isFileDeleted && video.file_deleted_at
+                          ? `Cleared ${formatTimestamp(video.file_deleted_at)}`
+                          : `Added ${formatTimestamp(video.created_at)}`}
+                      </span>
+                    </div>
+
+                    {/* Progress Bar for Downloading */}
+                    {isDownloading && (
+                      <div className="w-full max-w-md bg-surface-950 rounded-full h-1.5 overflow-hidden mt-1.5">
+                        <div
+                          className="bg-gradient-to-r from-amber-500 to-indigo-500 h-1.5 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.max(5, video.download_progress || 5)}%` }}
+                        ></div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Right: Actions */}
+                <div className="flex items-center gap-2 flex-wrap flex-shrink-0 self-end md:self-center">
+                  {/* Save Option (Download MP4 to PC) */}
+                  {isDownloaded && (
+                    <a
+                      href={`/api/direct/videos/${video.id}/file`}
+                      download={video.download_file_name || `${video.youtube_id}.mp4`}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition shadow-md shadow-emerald-500/20"
+                      title="Save / Download MP4 video to your computer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Save Video</span>
+                    </a>
+                  )}
+
+                  {/* Delete Video Option (Delete only video file to reduce storage; keep record) */}
+                  {isDownloaded && (
+                    <button
+                      type="button"
+                      onClick={() => onDeleteVideoFileOnly(video.id, video.title)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold transition"
+                      title="Delete video file to reduce storage. Record remains saved to prevent duplicate downloads in future."
+                    >
+                      <HardDrive className="w-3.5 h-3.5" />
+                      <span>Delete Video</span>
+                    </button>
+                  )}
+
+                  {/* Download / Re-download Button */}
+                  {!isDownloaded && !isDownloading && (
+                    <button
+                      type="button"
+                      onClick={() => onDownloadVideo(video.id)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white text-xs font-bold transition shadow"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>{video.was_downloaded ? "Re-download" : "Download"}</span>
+                    </button>
+                  )}
+
+                  {/* Permanent Delete Record Button */}
+                  <button
+                    type="button"
+                    onClick={() => onDeleteVideoPermanent(video.id, video.title)}
+                    className="p-2 rounded-xl bg-surface-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 border border-white/5 transition"
+                    title="Delete record and file permanently"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

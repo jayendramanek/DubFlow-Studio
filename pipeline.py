@@ -19,6 +19,9 @@ import subprocess
 import asyncio
 import zipfile
 import platform
+import math
+import uuid
+import gc
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Callable
 
@@ -246,17 +249,28 @@ class YouTubeDownloader:
         use_cookies: bool = True,
         clients: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        email = os.getenv("YOUTUBE_EMAIL", "manhwadesistyle@gmail.com")
-        password = os.getenv("YOUTUBE_PASSWORD", "G00gle@123")
-
         if clients is None:
             clients = ["visionos", "android", "ios", "mweb", "web"]
+
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/130.0.0.0 Safari/537.36"
+        )
 
         opts: Dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
             "remote_components": ["ejs:github"],
             "js_runtimes": {"node": {}, "deno": {}, "quickjs": {}},
+            "user_agent": user_agent,
+            "http_headers": {
+                "User-Agent": user_agent,
+                "Accept-Language": "en-US,en;q=0.9",
+                "Sec-Ch-Ua": '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+            },
             "extractor_args": {
                 "youtube": {
                     "player_client": clients
@@ -264,11 +278,8 @@ class YouTubeDownloader:
             },
         }
 
-        if email:
-            opts["username"] = email
-        if password:
-            opts["password"] = password
-
+        # NOTE: Google/YouTube requires session cookies for authenticated requests.
+        # Basic auth username/password is not supported by YouTube.
         if use_cookies:
             cookie_file = find_cookies_file()
             if cookie_file:
@@ -366,8 +377,9 @@ class YouTubeDownloader:
             ) from last_error
         elif "sign in" in err_msg.lower() or "bot" in err_msg.lower():
             raise RuntimeError(
-                f"YouTube requires sign-in verification for this video ({url}). Used account: {email}. "
-                f"Please ensure you are logged into YouTube in Chrome or upload the MP4 file directly via the 'Upload File' tab."
+                f"YouTube requires sign-in verification for this video ({url}). "
+                f"Because this server runs on a cloud VM, YouTube requires active session cookies for account '{email}'. "
+                f"Please update cookies via 'VM & Cookie Transfer Tools' or upload the MP4 file directly via the 'Upload File' tab."
             ) from last_error
         raise RuntimeError(f"YouTube download failed: {err_msg}") from last_error
 
@@ -422,7 +434,11 @@ class YouTubeDownloader:
         if "unavailable" in err_msg.lower():
             raise ValueError("YouTube video is unavailable. It may have been deleted, made private, or the URL contains a typo.") from last_error
         elif "sign in" in err_msg.lower() or "bot" in err_msg.lower():
-            raise ValueError(f"YouTube requires sign-in for this video. Attempted login with {email}. If issues persist, upload the file directly.") from last_error
+            raise ValueError(
+                f"YouTube requires sign-in verification for this video. "
+                f"Because this server runs on a cloud VM, YouTube requires active session cookies for '{email}'. "
+                f"Please update cookies via 'VM & Cookie Transfer Tools' or upload the file directly."
+            ) from last_error
         raise ValueError(f"Unable to access video: {err_msg}") from last_error
 
 
@@ -432,7 +448,41 @@ class YouTubeDownloader:
 # ============================================================================
 
 class VideoSegmenter:
-    """Trims and splits videos into timed parts using FFmpeg fast stream copy."""
+    """Trims, splits, and concatenates videos into timed parts using FFmpeg fast stream copy."""
+
+    @staticmethod
+    def get_duration(video_path: Path) -> float:
+        """Retrieves exact duration in seconds of a video file using ffprobe."""
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(video_path)
+        ]
+        try:
+            res = subprocess.check_output(cmd, stderr=subprocess.PIPE, text=True).strip()
+            val = float(res)
+            if val > 0:
+                return val
+        except Exception as e:
+            logger.warning(f"ffprobe duration probe failed on {video_path}: {e}")
+
+        try:
+            cmd_stream = [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video_path)
+            ]
+            res = subprocess.check_output(cmd_stream, stderr=subprocess.PIPE, text=True).strip()
+            val = float(res)
+            if val > 0:
+                return val
+        except Exception:
+            pass
+
+        return 0.0
 
     @staticmethod
     def trim(
@@ -443,7 +493,7 @@ class VideoSegmenter:
     ) -> Path:
         """
         Extracts a segment from input_video starting at start_seconds.
-        Uses keyframe-accurate fast stream copying (-c copy) in < 1 second.
+        Uses keyframe-accurate fast stream copying (-c copy) with clean timestamp resets.
         """
         output_video.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
@@ -454,7 +504,7 @@ class VideoSegmenter:
         if duration_seconds is not None and duration_seconds > 0:
             cmd.extend(["-t", str(duration_seconds)])
         
-        cmd.extend(["-c", "copy", str(output_video)])
+        cmd.extend(["-c", "copy", "-avoid_negative_ts", "make_zero", str(output_video)])
 
         try:
             logger.info(f"Trimming video segment: start={start_seconds}s, duration={duration_seconds}s -> {output_video.name}")
@@ -471,9 +521,112 @@ class VideoSegmenter:
             ]
             if duration_seconds is not None and duration_seconds > 0:
                 cmd_fallback.extend(["-t", str(duration_seconds)])
-            cmd_fallback.extend(["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "copy", str(output_video)])
+            cmd_fallback.extend(["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "copy", "-avoid_negative_ts", "make_zero", str(output_video)])
             subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             return output_video
+
+    @staticmethod
+    def merge_video_chunks(chunk_paths: List[Path], output_video: Path) -> Path:
+        """
+        Concatenates multiple video parts sequentially using FFmpeg concat demuxer.
+        Falls back to fast stream re-encode concat if fast copy encounters container issues.
+        """
+        if not chunk_paths:
+            raise ValueError("No video chunks provided to merge.")
+        if len(chunk_paths) == 1:
+            if Path(chunk_paths[0]).resolve() != output_video.resolve():
+                shutil.copyfile(str(chunk_paths[0]), str(output_video))
+            return output_video
+
+        output_video.parent.mkdir(parents=True, exist_ok=True)
+        list_file = output_video.parent / f"concat_list_{uuid.uuid4().hex[:6]}.txt"
+        try:
+            with open(list_file, "w", encoding="utf-8") as f:
+                for p in chunk_paths:
+                    escaped = str(Path(p).resolve()).replace("'", "'\\''")
+                    f.write(f"file '{escaped}'\n")
+
+            # Fast stream copy concat
+            cmd_copy = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_file),
+                "-c", "copy",
+                str(output_video)
+            ]
+            try:
+                subprocess.run(cmd_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                logger.info(f"Successfully merged {len(chunk_paths)} video chunks into {output_video.name} via stream copy.")
+                return output_video
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"Fast stream copy concat failed ({e.stderr.decode('utf-8', errors='ignore')[:200]}), falling back to safe re-encode concat...")
+                cmd_reencode = [
+                    "ffmpeg", "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", str(list_file),
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-b:a", "192k",
+                    str(output_video)
+                ]
+                subprocess.run(cmd_reencode, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                logger.info(f"Successfully merged {len(chunk_paths)} video chunks into {output_video.name} via re-encode concat.")
+                return output_video
+        finally:
+            if list_file.exists():
+                try:
+                    list_file.unlink()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def merge_audio_chunks(chunk_paths: List[Path], output_audio: Path) -> Path:
+        """Concatenates multiple audio files sequentially."""
+        valid_paths = [p for p in chunk_paths if p and Path(p).exists()]
+        if not valid_paths:
+            return output_audio
+        if len(valid_paths) == 1:
+            if Path(valid_paths[0]).resolve() != output_audio.resolve():
+                shutil.copyfile(str(valid_paths[0]), str(output_audio))
+            return output_audio
+
+        output_audio.parent.mkdir(parents=True, exist_ok=True)
+        list_file = output_audio.parent / f"concat_audio_{uuid.uuid4().hex[:6]}.txt"
+        try:
+            with open(list_file, "w", encoding="utf-8") as f:
+                for p in valid_paths:
+                    escaped = str(Path(p).resolve()).replace("'", "'\\''")
+                    f.write(f"file '{escaped}'\n")
+
+            cmd_copy = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_file),
+                "-c", "copy",
+                str(output_audio)
+            ]
+            try:
+                subprocess.run(cmd_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                return output_audio
+            except Exception:
+                cmd_reencode = [
+                    "ffmpeg", "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", str(list_file),
+                    "-c:a", "pcm_s16le",
+                    str(output_audio)
+                ]
+                subprocess.run(cmd_reencode, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                return output_audio
+        finally:
+            if list_file.exists():
+                try:
+                    list_file.unlink()
+                except Exception:
+                    pass
 
 
 class ShortsGenerator:
@@ -1973,6 +2126,518 @@ class ManhwaDubbingPipeline:
             speed_cap=self.speed_cap
         )
         self.remuxer = VideoRemuxer()
+        self.CHUNK_DURATION_SECONDS: float = 600.0  # 10 minutes (600 seconds)
+
+    @staticmethod
+    def _generate_silent_audio(output_path: Path, duration_seconds: float) -> Path:
+        """Generates a silent stereo WAV of duration_seconds via ffmpeg."""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        dur = max(0.5, float(duration_seconds))
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi",
+            "-i", "anullsrc=r=44100:cl=stereo",
+            "-t", str(dur),
+            str(output_path)
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        return output_path
+
+    def _process_single_chunk(
+        self,
+        chunk_video: Path,
+        chunk_work_dir: Path,
+        langs: List[str],
+        report_fn: Callable[[float, str], None],
+        enable_watermark: Optional[bool] = None,
+        watermark_text: Optional[str] = None,
+        watermark_interval: Optional[float] = None,
+        watermark_opacity: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Executes Steps 1 to 5 for a single 10-minute (or shorter) chunk:
+        Demix audio -> Whisper transcribe -> Translate -> TTS -> Remux.
+        """
+        chunk_work_dir.mkdir(parents=True, exist_ok=True)
+        is_multi = len(langs) > 1
+
+        # Step 1: Audio Extraction & Demixing (Vocals vs BGM/SFX)
+        report_fn(0.05, "Step 1 of 5: Extracting audio and demixing vocals from BGM/SFX...")
+        extracted_audio = chunk_work_dir / "original_audio.wav"
+        self.demixer.extract_audio(chunk_video, extracted_audio)
+
+        vocals_path, bg_path = self.demixer.separate_audio(extracted_audio, chunk_work_dir)
+        total_duration = self.tts.get_audio_duration(extracted_audio)
+        report_fn(0.25, "Step 1 of 5 complete: Vocals and background audio separated.")
+
+        # Step 2: Timed Transcription (Whisper)
+        report_fn(0.30, "Step 2 of 5: Transcribing English vocals into timed segments...")
+        segments = self.transcriber.transcribe(vocals_path)
+        if not segments:
+            logger.warning(f"No speech segments detected in vocals track for {chunk_video.name}.")
+            segments = []
+
+        english_transcript_file = chunk_work_dir / "english_transcript.json"
+        with open(english_transcript_file, "w", encoding="utf-8") as f:
+            json.dump(segments, f, indent=2, ensure_ascii=False)
+        report_fn(0.50, f"Step 2 of 5 complete: {len(segments)} segments transcribed.")
+
+        # Steps 3 to 5: Translate, Synthesize TTS, and Remux per language
+        languages_result: Dict[str, Any] = {}
+        total_langs = len(langs)
+        lang_progress_budget = 0.48 / total_langs
+
+        for idx, lang in enumerate(langs):
+            lang_name = LANGUAGE_NAMES.get(lang, lang.capitalize())
+            lang_dir = chunk_work_dir / lang_name
+            lang_dir.mkdir(parents=True, exist_ok=True)
+
+            lang_base_pct = 0.50 + idx * lang_progress_budget
+            lang_label = f"[{lang_name} ({idx + 1}/{total_langs})]" if is_multi else f"[{lang_name}]"
+
+            # Step 3: Text Translation
+            report_fn(
+                lang_base_pct + 0.10 * lang_progress_budget,
+                f"{lang_label} Translating dialogue segments into {lang_name}..."
+            )
+            if segments:
+                translator = SegmentTranslator(
+                    engine=self.translation_engine,
+                    target_lang=lang,
+                    device=self.device
+                )
+                translated_segments = translator.translate_segments(segments)
+            else:
+                translated_segments = []
+
+            lang_transcript_json = lang_dir / f"segments_{lang}.json"
+            with open(lang_transcript_json, "w", encoding="utf-8") as f:
+                json.dump(translated_segments, f, indent=2, ensure_ascii=False)
+
+            # Step 4: Timestamp-Aware TTS
+            if not is_multi and self.tts_voice and self.target_lang == lang:
+                lang_voice = self.tts_voice
+            else:
+                lang_voice = resolve_voice(lang, self.voice_gender)
+
+            report_fn(
+                lang_base_pct + 0.40 * lang_progress_budget,
+                f"{lang_label} Synthesizing speech timeline with native voice ({lang_voice})..."
+            )
+            lang_dubbed_vocals = lang_dir / f"{lang}_vocals.wav"
+            if translated_segments:
+                tts_inst = TimestampAwareTTS(
+                    engine=self.tts_engine,
+                    target_lang=lang,
+                    voice_clone=self.voice_clone,
+                    voice_name=lang_voice,
+                    voice_gender=self.voice_gender,
+                    device=self.device,
+                    speed_cap=self.speed_cap
+                )
+                tts_inst.generate_and_align(
+                    segments=translated_segments,
+                    reference_vocals_path=vocals_path if self.voice_clone else None,
+                    output_spanish_vocals=lang_dubbed_vocals,
+                    total_duration=total_duration,
+                    temp_dir=lang_dir,
+                    auto_speed_adjust=True,
+                    speed_cap=self.speed_cap
+                )
+            else:
+                self._generate_silent_audio(lang_dubbed_vocals, total_duration)
+
+            # Step 5: Remuxing
+            report_fn(
+                lang_base_pct + 0.85 * lang_progress_budget,
+                f"{lang_label} Mixing {lang_name} audio & remuxing video stream..."
+            )
+            lang_output_video = lang_dir / f"{chunk_video.stem}_{lang_name}_dubbed.mp4"
+            effective_enable_wm = self.enable_watermark if enable_watermark is None else enable_watermark
+            effective_wm_text = watermark_text if watermark_text is not None else self.watermark_text
+            effective_wm_interval = watermark_interval if watermark_interval is not None else self.watermark_interval
+            effective_wm_opacity = watermark_opacity if watermark_opacity is not None else self.watermark_opacity
+
+            self.remuxer.remux_and_export(
+                original_video=chunk_video,
+                spanish_vocals=lang_dubbed_vocals,
+                background_audio=bg_path,
+                output_video=lang_output_video,
+                bg_volume=self.bg_volume,
+                vocals_volume=self.vocals_volume,
+                watermark_text=effective_wm_text if effective_enable_wm else None,
+                watermark_interval=effective_wm_interval,
+                watermark_opacity=effective_wm_opacity,
+            )
+
+            languages_result[lang] = {
+                "lang": lang,
+                "lang_name": lang_name,
+                "folder": str(lang_dir),
+                "final_video": str(lang_output_video),
+                "dub_vocals": str(lang_dubbed_vocals),
+                "segments_json": str(lang_transcript_json),
+                "segments": translated_segments,
+                "voice": lang_voice,
+            }
+
+        return {
+            "chunk_video": str(chunk_video),
+            "chunk_work_dir": str(chunk_work_dir),
+            "english_segments": segments,
+            "extracted_audio": str(extracted_audio),
+            "vocals": str(vocals_path),
+            "background": str(bg_path),
+            "total_duration": total_duration,
+            "languages": languages_result
+        }
+
+    def _run_chunked(
+        self,
+        input_video: Path,
+        job_dir: Path,
+        langs: List[str],
+        output_path: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        effective_start: float = 0.0,
+        effective_duration: float = 600.0,
+        enable_watermark: Optional[bool] = None,
+        watermark_text: Optional[str] = None,
+        watermark_interval: Optional[float] = None,
+        watermark_opacity: Optional[float] = None,
+        gemini_api_key: Optional[str] = None,
+        is_shorts_mode: bool = False,
+        generate_shorts: bool = False,
+        shorts_count: int = 3,
+        short_duration: float = 45.0,
+        shorts_aspect_ratio: str = "9:16",
+        selected_moment_index: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Processes long videos (>10 mins) safely by splitting into 10-minute parts,
+        converting each part individually, and merging all parts into the final video.
+        """
+        def report(progress: float, message: str):
+            logger.info(f"[{int(progress * 100)}%] {message}")
+            if progress_callback:
+                progress_callback(progress, message)
+
+        is_multi = len(langs) > 1
+        num_chunks = int(math.ceil(effective_duration / self.CHUNK_DURATION_SECONDS))
+        chunks_dir = job_dir / "chunks"
+        chunks_dir.mkdir(parents=True, exist_ok=True)
+
+        def fmt_time(sec: float) -> str:
+            h = int(sec // 3600)
+            m = int((sec % 3600) // 60)
+            s = int(sec % 60)
+            return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+
+        report(
+            0.02,
+            f"Video length is {effective_duration / 60:.1f} mins (> 10 mins). Processing in {num_chunks} x 10-minute parts for memory stability, then merging all parts..."
+        )
+
+        chunk_results = []
+        for idx in range(num_chunks):
+            c_start = effective_start + idx * self.CHUNK_DURATION_SECONDS
+            c_dur = min(self.CHUNK_DURATION_SECONDS, effective_duration - (idx * self.CHUNK_DURATION_SECONDS))
+            c_label = f"Part {idx + 1}/{num_chunks}"
+            c_time_range = f"{fmt_time(c_start)} - {fmt_time(c_start + c_dur)}"
+
+            chunk_dir = chunks_dir / f"part_{idx + 1}"
+            chunk_dir.mkdir(parents=True, exist_ok=True)
+
+            chunk_source = chunk_dir / f"source_part_{idx + 1}.mp4"
+            report(
+                (idx / num_chunks) * 0.85 + 0.01,
+                f"[{c_label} ({c_time_range})] Extracting 10-minute video part..."
+            )
+            VideoSegmenter.trim(
+                input_video=input_video,
+                output_video=chunk_source,
+                start_seconds=c_start,
+                duration_seconds=c_dur
+            )
+
+            def chunk_report(p: float, msg: str):
+                base_p = (idx / num_chunks) * 0.85
+                budget = 0.85 / num_chunks
+                overall_p = min(0.88, base_p + p * budget)
+                report(overall_p, f"[{c_label} ({c_time_range})] {msg}")
+
+            chunk_res = self._process_single_chunk(
+                chunk_video=chunk_source,
+                chunk_work_dir=chunk_dir,
+                langs=langs,
+                report_fn=chunk_report,
+                enable_watermark=enable_watermark,
+                watermark_text=watermark_text,
+                watermark_interval=watermark_interval,
+                watermark_opacity=watermark_opacity,
+            )
+            chunk_results.append(chunk_res)
+
+            # Free memory between chunks
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                elif hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                    torch.mps.empty_cache()
+            except Exception:
+                pass
+
+        # Step: Merge all chunk results into final video and language assets
+        report(0.88, f"All {num_chunks} parts converted successfully! Merging into complete final video...")
+
+        # Calculate accurate cumulative start timestamp offsets for segment transcripts
+        offsets = [0.0]
+        for i in range(num_chunks - 1):
+            offsets.append(offsets[-1] + chunk_results[i]["total_duration"])
+
+        languages_result: Dict[str, Any] = {}
+        for lang_idx, lang in enumerate(langs):
+            lang_name = LANGUAGE_NAMES.get(lang, lang.capitalize())
+            lang_dir = job_dir / lang_name
+            lang_dir.mkdir(parents=True, exist_ok=True)
+
+            report(
+                0.88 + 0.04 * (lang_idx / len(langs)),
+                f"[{lang_name}] Merging {num_chunks} parts into final {lang_name} dubbed video..."
+            )
+
+            chunk_videos = [Path(chunk_results[i]["languages"][lang]["final_video"]) for i in range(num_chunks)]
+            final_lang_video = lang_dir / f"{input_video.stem}_{lang_name}_dubbed.mp4"
+            VideoSegmenter.merge_video_chunks(chunk_videos, final_lang_video)
+
+            # Merge translated segments with cumulative timeline offset
+            merged_segments = []
+            for i in range(num_chunks):
+                offset = offsets[i]
+                chunk_segs = chunk_results[i]["languages"][lang]["segments"]
+                for seg in chunk_segs:
+                    s = dict(seg)
+                    s["start"] = round(float(seg.get("start", 0.0)) + offset, 2)
+                    s["end"] = round(float(seg.get("end", 0.0)) + offset, 2)
+                    merged_segments.append(s)
+
+            lang_transcript_json = lang_dir / f"segments_{lang}.json"
+            with open(lang_transcript_json, "w", encoding="utf-8") as f:
+                json.dump(merged_segments, f, indent=2, ensure_ascii=False)
+
+            # Merge dubbed vocals audio
+            chunk_dub_vocals = [Path(chunk_results[i]["languages"][lang]["dub_vocals"]) for i in range(num_chunks)]
+            final_lang_dub_vocals = lang_dir / f"{lang}_vocals.wav"
+            VideoSegmenter.merge_audio_chunks(chunk_dub_vocals, final_lang_dub_vocals)
+
+            # Generate YouTube SEO pack and thumbnail for full merged video
+            report(0.92, f"[{lang_name}] Generating YouTube SEO Pack & Thumbnail for full video...")
+            meta_result = None
+            thumb_result = None
+            try:
+                active_key = gemini_api_key or self.gemini_api_key
+                video_title_hint = input_video.stem.replace("_", " ")
+                summary_hint = " ".join([s.get("translated_text", "") for s in merged_segments[:15]])
+                seo_meta = MultilingualMetadataGenerator.generate(
+                    target_lang=lang,
+                    english_title=video_title_hint,
+                    context_text=summary_hint,
+                    gemini_api_key=active_key
+                )
+                meta_json_path = lang_dir / f"metadata_{lang}.json"
+                with open(meta_json_path, "w", encoding="utf-8") as f:
+                    json.dump(seo_meta, f, indent=2, ensure_ascii=False)
+
+                meta_txt_path = lang_dir / f"youtube_metadata_{lang}.txt"
+                with open(meta_txt_path, "w", encoding="utf-8") as f:
+                    f.write(f"TITEL / TITLE:\n{seo_meta['title']}\n\n")
+                    f.write(f"BESCHREIBUNG / DESCRIPTION:\n{seo_meta['description']}\n\n")
+                    f.write(f"TAGS:\n{seo_meta['tags']}\n")
+
+                if lang == "de":
+                    with open(lang_dir / "metadata_german.json", "w", encoding="utf-8") as f:
+                        json.dump(seo_meta, f, indent=2, ensure_ascii=False)
+
+                thumb_out_path = lang_dir / f"thumbnail_{lang}.jpg"
+                MultilingualThumbnailGenerator.generate_thumbnail(
+                    video_path=final_lang_video,
+                    hook_text=seo_meta.get("thumbnail_hook", ""),
+                    output_path=thumb_out_path,
+                    lang_code=lang
+                )
+                if lang == "de":
+                    shutil.copyfile(str(thumb_out_path), str(lang_dir / "thumbnail_german.jpg"))
+
+                meta_result = seo_meta
+                thumb_result = str(thumb_out_path)
+            except Exception as meta_err:
+                logger.warning(f"{lang_name} SEO pack generation failed: {meta_err}")
+
+            languages_result[lang] = {
+                "lang": lang,
+                "lang_name": lang_name,
+                "folder": str(lang_dir),
+                "final_video": str(final_lang_video),
+                "dub_vocals": str(final_lang_dub_vocals),
+                "segments_json": str(lang_transcript_json),
+                "segments": merged_segments,
+                "voice": chunk_results[0]["languages"][lang]["voice"],
+                "metadata": meta_result,
+                "thumbnail": thumb_result,
+            }
+
+        # Merge Master English transcript
+        merged_english_segments = []
+        for i in range(num_chunks):
+            offset = offsets[i]
+            for seg in chunk_results[i]["english_segments"]:
+                s = dict(seg)
+                s["start"] = round(float(seg.get("start", 0.0)) + offset, 2)
+                s["end"] = round(float(seg.get("end", 0.0)) + offset, 2)
+                merged_english_segments.append(s)
+
+        english_transcript_file = job_dir / "english_transcript.json"
+        with open(english_transcript_file, "w", encoding="utf-8") as f:
+            json.dump(merged_english_segments, f, indent=2, ensure_ascii=False)
+
+        # Backward compatibility segments_translated.json in job root
+        primary_lang = langs[0]
+        primary_info = languages_result[primary_lang]
+        primary_video_path = Path(primary_info["final_video"])
+        with open(job_dir / "segments_translated.json", "w", encoding="utf-8") as f:
+            json.dump(primary_info["segments"], f, indent=2, ensure_ascii=False)
+
+        # Merge shared audio stems in job root
+        final_bg_path = job_dir / "background_music_sfx.wav"
+        VideoSegmenter.merge_audio_chunks([Path(c["background"]) for c in chunk_results], final_bg_path)
+
+        final_vocals_path = job_dir / "vocals.wav"
+        VideoSegmenter.merge_audio_chunks([Path(c["vocals"]) for c in chunk_results], final_vocals_path)
+
+        final_orig_audio = job_dir / "original_audio.wav"
+        VideoSegmenter.merge_audio_chunks([Path(c["extracted_audio"]) for c in chunk_results], final_orig_audio)
+
+        total_merged_duration = VideoSegmenter.get_duration(primary_video_path)
+        if total_merged_duration <= 0.0:
+            total_merged_duration = sum(c.get("total_duration", 0.0) for c in chunk_results)
+
+        # Clean up chunk directories to save disk space
+        try:
+            shutil.rmtree(chunks_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        # Generate Shorts if requested
+        should_gen_shorts = generate_shorts or is_shorts_mode
+        if should_gen_shorts:
+            report(0.95, f"Generating Top {shorts_count} Instagram Reels / YouTube Shorts (9:16 vertical)...")
+            try:
+                top_moments = ShortsGenerator.detect_top_moments(
+                    video_path=primary_video_path,
+                    audio_path=final_orig_audio,
+                    duration_seconds=total_merged_duration,
+                    num_moments=shorts_count,
+                    moment_duration=short_duration,
+                )
+                for l_code, l_info in languages_result.items():
+                    lang_video_file = Path(l_info["final_video"])
+                    lang_folder_p = Path(l_info["folder"])
+                    shorts_dir = lang_folder_p / "Shorts"
+                    shorts_dir.mkdir(parents=True, exist_ok=True)
+                    lang_shorts = []
+                    for m in top_moments:
+                        short_clean_time = m["time_range"].replace(":", "-").replace(" ", "")
+                        short_fname = f"short_{m['index']}_{short_clean_time}.mp4"
+                        short_dest = shorts_dir / short_fname
+                        try:
+                            ShortsGenerator.create_vertical_short(
+                                input_video=lang_video_file,
+                                output_path=short_dest,
+                                start_seconds=m["start_seconds"],
+                                duration_seconds=m["duration_seconds"],
+                                aspect_ratio=shorts_aspect_ratio,
+                            )
+                            lang_shorts.append({
+                                "index": m["index"],
+                                "title": m["title"],
+                                "category": m["category"],
+                                "time_range": m["time_range"],
+                                "start_seconds": m["start_seconds"],
+                                "duration_seconds": m["duration_seconds"],
+                                "filename": short_fname,
+                                "file_path": str(short_dest),
+                                "aspect_ratio": shorts_aspect_ratio,
+                            })
+                        except Exception as s_err:
+                            logger.warning(f"Could not generate short #{m['index']} for {l_code}: {s_err}")
+                    l_info["shorts"] = lang_shorts
+            except Exception as e:
+                logger.warning(f"Shorts generation failed: {e}")
+
+        # If user provided a specific single output path, copy the primary result there
+        if output_path and not is_multi:
+            custom_out = Path(output_path).resolve()
+            if custom_out != primary_video_path:
+                custom_out.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(str(primary_video_path), str(custom_out))
+                primary_video_path = custom_out
+
+        # Create clean ZIP archive bundling all language folders and shorts
+        zip_path = job_dir / "all_dubbed_languages.zip"
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for l_code, l_info in languages_result.items():
+                    l_folder = Path(l_info["folder"])
+                    if l_folder.exists():
+                        for f in l_folder.rglob("*"):
+                            if f.is_file() and not f.name.startswith("chunk_"):
+                                rel = f.relative_to(l_folder)
+                                zipf.write(f, arcname=f"{l_info['lang_name']}/{rel}")
+                if english_transcript_file.exists():
+                    zipf.write(english_transcript_file, arcname="shared/english_transcript.json")
+                if final_bg_path.exists():
+                    zipf.write(final_bg_path, arcname="shared/background_music_sfx.wav")
+        except Exception as e:
+            logger.warning(f"Could not build ZIP archive: {e}")
+
+        report(
+            1.0,
+            f"Dubbing complete for {len(langs)} language(s)! ({num_chunks} x 10-minute parts merged into {job_dir.name}/)"
+        )
+
+        metadata_by_lang = {
+            l: info.get("metadata")
+            for l, info in languages_result.items()
+            if info.get("metadata")
+        }
+        thumbnails_by_lang = {
+            l: info.get("thumbnail")
+            for l, info in languages_result.items()
+            if info.get("thumbnail")
+        }
+
+        return {
+            "is_multi_language": is_multi,
+            "target_langs": langs,
+            "languages": languages_result,
+            "final_video": str(primary_video_path),
+            "original_audio": str(final_orig_audio),
+            "vocals": str(final_vocals_path),
+            "background": str(final_bg_path),
+            "dub_vocals": primary_info["dub_vocals"],
+            "spanish_vocals": primary_info["dub_vocals"],
+            "segments": primary_info["segments"],
+            "total_duration": total_merged_duration,
+            "zip_path": str(zip_path) if zip_path.exists() else None,
+            "metadata": primary_info.get("metadata"),
+            "thumbnail": primary_info.get("thumbnail"),
+            "metadata_by_lang": metadata_by_lang,
+            "thumbnails_by_lang": thumbnails_by_lang,
+            "shorts": primary_info.get("shorts", []),
+            "is_shorts_mode": is_shorts_mode,
+        }
 
     def run(
         self,
@@ -1996,21 +2661,9 @@ class ManhwaDubbingPipeline:
         selected_moment_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Executes the local AI dubbing pipeline. Supports multi-language batching
-        where audio separation and speech recognition run once, followed by
-        per-language translation, speech synthesis, and remuxing into dedicated subfolders.
-        
-        Args:
-            video_path: Path to input English MP4.
-            output_path: Optional explicit output path for single-language runs.
-            progress_callback: Optional callback func(progress_float, status_str).
-            start_seconds: Optional start timestamp to trim/extract a specific part.
-            duration_seconds: Optional duration in seconds to trim.
-            part_name: Optional part label (e.g. 'part_1').
-            target_langs: Optional list of language ISO codes (e.g. ['de', 'fr', 'id']).
-            
-        Returns:
-            Dict containing language folders, final videos, stems, and metadata.
+        Executes the local AI dubbing pipeline. If the video duration exceeds 10 minutes,
+        it automatically processes the video by splitting into 10-minute parts, dubbing each part,
+        and merging all parts into the final complete video.
         """
         input_video = Path(video_path).resolve()
         if not input_video.exists():
@@ -2031,11 +2684,54 @@ class ManhwaDubbingPipeline:
         langs = [l.strip().lower() for l in target_langs if l.strip()] if target_langs else [self.target_lang]
         if not langs:
             langs = [self.target_lang]
-        # Deduplicate while preserving order
         langs = list(dict.fromkeys(langs))
         is_multi = len(langs) > 1
 
-        # Handle splitting / trimming into parts before processing
+        # Check total duration to determine if 10-minute auto-chunking is needed
+        video_dur = VideoSegmenter.get_duration(input_video)
+        if video_dur <= 0.0:
+            try:
+                video_dur = self.tts.get_audio_duration(input_video)
+            except Exception:
+                video_dur = 600.0
+
+        effective_start = float(start_seconds or 0.0)
+        if duration_seconds is not None and duration_seconds > 0:
+            effective_duration = float(duration_seconds)
+        else:
+            effective_duration = max(0.0, video_dur - effective_start)
+        if effective_duration <= 0.0:
+            effective_duration = video_dur
+
+        # If length exceeds 10 minutes (600s), process via 10-min splitting + conversion + merge
+        if effective_duration > self.CHUNK_DURATION_SECONDS:
+            logger.info(
+                f"Video duration ({effective_duration:.1f}s) exceeds 10 minutes ({self.CHUNK_DURATION_SECONDS}s). "
+                f"Processing via auto-split 10-minute parts and merging all parts..."
+            )
+            return self._run_chunked(
+                input_video=input_video,
+                job_dir=job_dir,
+                langs=langs,
+                output_path=output_path,
+                progress_callback=progress_callback,
+                effective_start=effective_start,
+                effective_duration=effective_duration,
+                enable_watermark=enable_watermark,
+                watermark_text=watermark_text,
+                watermark_interval=watermark_interval,
+                watermark_opacity=watermark_opacity,
+                gemini_api_key=gemini_api_key,
+                is_shorts_mode=is_shorts_mode,
+                generate_shorts=generate_shorts,
+                shorts_count=shorts_count,
+                short_duration=short_duration,
+                shorts_aspect_ratio=shorts_aspect_ratio,
+                selected_moment_index=selected_moment_index,
+            )
+
+        # Single-pass execution for <= 10 minute videos / parts
+        # Handle splitting / trimming if specific part start/duration requested
         if (start_seconds is not None and start_seconds > 0) or (duration_seconds is not None and duration_seconds > 0):
             part_tag = part_name or f"part_{int(start_seconds or 0)}_{int(duration_seconds or 0)}"
             trimmed_source = job_dir / f"{input_video.stem}_{part_tag}.mp4"
@@ -2048,122 +2744,42 @@ class ManhwaDubbingPipeline:
             )
 
         try:
-            # Step 1: Audio Extraction & Demixing (Vocals vs BGM/SFX - runs ONCE for all languages)
-            report(0.05, "Step 1 of 5: Extracting audio and demixing vocals from BGM/SFX...")
-            extracted_audio = job_dir / "original_audio.wav"
-            self.demixer.extract_audio(input_video, extracted_audio)
-            
-            vocals_path, bg_path = self.demixer.separate_audio(extracted_audio, job_dir)
-            total_duration = self.tts.get_audio_duration(extracted_audio)
-            report(0.25, "Step 1 of 5 complete: Vocals and background audio separated.")
+            chunk_res = self._process_single_chunk(
+                chunk_video=input_video,
+                chunk_work_dir=job_dir,
+                langs=langs,
+                report_fn=report,
+                enable_watermark=enable_watermark,
+                watermark_text=watermark_text,
+                watermark_interval=watermark_interval,
+                watermark_opacity=watermark_opacity,
+            )
 
-            # Step 2: Timed Transcription (English speech to text - runs ONCE for all languages)
-            report(0.30, "Step 2 of 5: Transcribing English vocals into timed segments...")
-            segments = self.transcriber.transcribe(vocals_path)
-            if not segments:
-                raise ValueError("No speech segments detected in vocals track.")
-            
-            # Save master English transcription in job root directory
+            languages_result = chunk_res["languages"]
+            total_duration = chunk_res["total_duration"]
+            extracted_audio = Path(chunk_res["extracted_audio"])
+            vocals_path = Path(chunk_res["vocals"])
+            bg_path = Path(chunk_res["background"])
             english_transcript_file = job_dir / "english_transcript.json"
-            with open(english_transcript_file, "w", encoding="utf-8") as f:
-                json.dump(segments, f, indent=2, ensure_ascii=False)
-            report(0.50, f"Step 2 of 5 complete: {len(segments)} segments transcribed.")
 
-            # Steps 3 to 5: Translate, Synthesize TTS, and Remux into Separate Folder Per Language
-            languages_result: Dict[str, Any] = {}
-            total_langs = len(langs)
-            lang_progress_budget = 0.48 / total_langs
+            # Step 5b: Generate YouTube SEO Pack and Thumbnail (Only for Full video or First Part)
+            is_first_part_or_full = (
+                (start_seconds is None or start_seconds == 0.0) or
+                (part_name and any(p in part_name.lower() for p in ["part_1", "part 1", "part_0", "part 0"]))
+            )
 
             for idx, lang in enumerate(langs):
                 lang_name = LANGUAGE_NAMES.get(lang, lang.capitalize())
-                lang_dir = job_dir / lang_name
-                lang_dir.mkdir(parents=True, exist_ok=True)
+                lang_dir = Path(languages_result[lang]["folder"])
+                lang_output_video = Path(languages_result[lang]["final_video"])
+                translated_segments = languages_result[lang]["segments"]
 
-                lang_base_pct = 0.50 + idx * lang_progress_budget
-                lang_label = f"[{lang_name} ({idx + 1}/{total_langs})]" if is_multi else f"[{lang_name}]"
-
-                # Step 3: Text Translation for this language
-                report(
-                    lang_base_pct + 0.10 * lang_progress_budget,
-                    f"{lang_label} Translating dialogue segments into {lang_name}..."
-                )
-                translator = SegmentTranslator(
-                    engine=self.translation_engine,
-                    target_lang=lang,
-                    device=self.device
-                )
-                translated_segments = translator.translate_segments(segments)
-
-                # Save language-specific transcript JSON in its own folder
-                lang_transcript_json = lang_dir / f"segments_{lang}.json"
-                with open(lang_transcript_json, "w", encoding="utf-8") as f:
-                    json.dump(translated_segments, f, indent=2, ensure_ascii=False)
-
-                # Step 4: Timestamp-Aware TTS for this language
-                if not is_multi and self.tts_voice and self.target_lang == lang:
-                    lang_voice = self.tts_voice
-                else:
-                    lang_voice = resolve_voice(lang, self.voice_gender)
-
-                report(
-                    lang_base_pct + 0.40 * lang_progress_budget,
-                    f"{lang_label} Synthesizing speech timeline with native voice ({lang_voice})..."
-                )
-                tts_inst = TimestampAwareTTS(
-                    engine=self.tts_engine,
-                    target_lang=lang,
-                    voice_clone=self.voice_clone,
-                    voice_name=lang_voice,
-                    voice_gender=self.voice_gender,
-                    device=self.device,
-                    speed_cap=self.speed_cap
-                )
-                lang_dubbed_vocals = lang_dir / f"{lang}_vocals.wav"
-                tts_inst.generate_and_align(
-                    segments=translated_segments,
-                    reference_vocals_path=vocals_path if self.voice_clone else None,
-                    output_spanish_vocals=lang_dubbed_vocals,
-                    total_duration=total_duration,
-                    temp_dir=lang_dir,
-                    auto_speed_adjust=True,
-                    speed_cap=self.speed_cap
-                )
-
-                # Step 5: Audio Re-muxing & Video Export for this language
-                report(
-                    lang_base_pct + 0.85 * lang_progress_budget,
-                    f"{lang_label} Mixing {lang_name} audio & remuxing video stream..."
-                )
-                lang_output_video = lang_dir / f"{input_video.stem}_{lang_name}_dubbed.mp4"
-                # Determine effective watermark settings
-                effective_enable_wm = self.enable_watermark if enable_watermark is None else enable_watermark
-                effective_wm_text = watermark_text if watermark_text is not None else self.watermark_text
-                effective_wm_interval = watermark_interval if watermark_interval is not None else self.watermark_interval
-                effective_wm_opacity = watermark_opacity if watermark_opacity is not None else self.watermark_opacity
-
-                self.remuxer.remux_and_export(
-                    original_video=input_video,
-                    spanish_vocals=lang_dubbed_vocals,
-                    background_audio=bg_path,
-                    output_video=lang_output_video,
-                    bg_volume=self.bg_volume,
-                    vocals_volume=self.vocals_volume,
-                    watermark_text=effective_wm_text if effective_enable_wm else None,
-                    watermark_interval=effective_wm_interval,
-                    watermark_opacity=effective_wm_opacity,
-                )
-
-                # Step 5b: Generate YouTube SEO Pack and Thumbnail (Only for Full video or First Part)
-                is_first_part_or_full = (
-                    (start_seconds is None or start_seconds == 0.0) or
-                    (part_name and any(p in part_name.lower() for p in ["part_1", "part 1", "part_0", "part 0"]))
-                )
                 meta_result = None
                 thumb_result = None
                 if is_first_part_or_full:
                     report(
-                        lang_base_pct + 0.95 * lang_progress_budget,
-                        f"{lang_label} Generating YouTube SEO Pack & Thumbnail ({lang_name})..."
+                        0.92 + 0.04 * (idx / len(langs)),
+                        f"[{lang_name}] Generating YouTube SEO Pack & Thumbnail ({lang_name})..."
                     )
                     try:
                         active_key = gemini_api_key or self.gemini_api_key
@@ -2186,7 +2802,6 @@ class ManhwaDubbingPipeline:
                             f.write(f"BESCHREIBUNG / DESCRIPTION:\n{seo_meta['description']}\n\n")
                             f.write(f"TAGS:\n{seo_meta['tags']}\n")
 
-                        # Backward compatibility copy for German
                         if lang == "de":
                             with open(lang_dir / "metadata_german.json", "w", encoding="utf-8") as f:
                                 json.dump(seo_meta, f, indent=2, ensure_ascii=False)
@@ -2207,20 +2822,10 @@ class ManhwaDubbingPipeline:
                     except Exception as meta_err:
                         logger.warning(f"{lang_name} SEO pack generation failed: {meta_err}")
 
-                languages_result[lang] = {
-                    "lang": lang,
-                    "lang_name": lang_name,
-                    "folder": str(lang_dir),
-                    "final_video": str(lang_output_video),
-                    "dub_vocals": str(lang_dubbed_vocals),
-                    "segments_json": str(lang_transcript_json),
-                    "segments": translated_segments,
-                    "voice": lang_voice,
-                    "metadata": meta_result,
-                    "thumbnail": thumb_result,
-                }
+                languages_result[lang]["metadata"] = meta_result
+                languages_result[lang]["thumbnail"] = thumb_result
 
-            # Generate Instagram & YouTube Shorts if requested
+            # Generate Shorts if requested
             should_gen_shorts = generate_shorts or is_shorts_mode
             if should_gen_shorts:
                 report(0.96, f"Generating Top {shorts_count} Instagram Reels / YouTube Shorts (9:16 vertical)...")
@@ -2268,7 +2873,6 @@ class ManhwaDubbingPipeline:
             primary_info = languages_result[primary_lang]
             primary_video_path = Path(primary_info["final_video"])
 
-            # If user provided a specific single output path, copy the primary result there
             if output_path and not is_multi:
                 custom_out = Path(output_path).resolve()
                 if custom_out != primary_video_path:
@@ -2276,11 +2880,9 @@ class ManhwaDubbingPipeline:
                     shutil.copyfile(str(primary_video_path), str(custom_out))
                     primary_video_path = custom_out
 
-            # Save default segments_translated.json in job root for backward compatibility
             with open(job_dir / "segments_translated.json", "w", encoding="utf-8") as f:
                 json.dump(primary_info["segments"], f, indent=2, ensure_ascii=False)
 
-            # Create clean ZIP archive bundling all language folders and shorts
             zip_path = job_dir / "all_dubbed_languages.zip"
             try:
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
