@@ -267,6 +267,8 @@ class HealthResponse(BaseModel):
     ffmpeg_available: bool
     python_version: str
     active_jobs: int
+    storage_free_gb: Optional[float] = None
+    storage_total_gb: Optional[float] = None
 
 
 class DubbingJobResponse(BaseModel):
@@ -628,6 +630,7 @@ def health_check():
     """Returns dynamic hardware acceleration status and dependencies across Linux Cloud VMs, macOS, and Windows."""
     hw = HardwareAccelerationManager.get_device_info()
     ffmpeg_ok = HardwareAccelerationManager.verify_ffmpeg()
+    storage = db.get_system_storage()
     return {
         "status": "healthy" if ffmpeg_ok else "degraded",
         "hardware_device": hw["device"],
@@ -636,7 +639,9 @@ def health_check():
         "cpu_cores": hw["cpu_cores"],
         "ffmpeg_available": ffmpeg_ok,
         "python_version": sys.version.split()[0],
-        "active_jobs": sum(1 for j in jobs_db.values() if j["status"] in ["queued", "processing"])
+        "active_jobs": sum(1 for j in jobs_db.values() if j["status"] in ["queued", "processing"]),
+        "storage_free_gb": storage.get("free_gb"),
+        "storage_total_gb": storage.get("total_gb")
     }
 
 
@@ -2444,7 +2449,7 @@ def get_ytd_video_status(video_id: int):
     }
 
 
-@app.get("/api/ytd/videos/{video_id}/file", tags=["YTD"])
+@app.api_route("/api/ytd/videos/{video_id}/file", methods=["GET", "HEAD"], tags=["YTD"])
 def download_ytd_video_file(video_id: int):
     """Serves the downloaded video or ZIP archive to the browser."""
     vid = ytd.get_video_by_id(video_id)
@@ -2453,10 +2458,15 @@ def download_ytd_video_file(video_id: int):
 
     file_p = Path(vid["download_path"])
     if not file_p.exists():
-        raise HTTPException(status_code=404, detail="Downloaded file is missing from disk")
+        fallback_p = ytd.YTD_DOWNLOADS_DIR / file_p.name
+        if fallback_p.exists():
+            file_p = fallback_p
+        else:
+            raise HTTPException(status_code=404, detail="Downloaded file is missing from disk")
 
     media_type = "application/zip" if vid["is_zip"] else "video/mp4"
-    filename = vid["download_file_name"] or file_p.name
+    raw_fname = vid["download_file_name"] or file_p.name
+    filename = re.sub(r'[\r\n\t]+', ' ', raw_fname).strip() or file_p.name
     return FileResponse(path=file_p, media_type=media_type, filename=filename)
 
 
@@ -2551,7 +2561,7 @@ def get_direct_video_status(video_id: int):
     }
 
 
-@app.get("/api/direct/videos/{video_id}/file", tags=["Direct Downloads"])
+@app.api_route("/api/direct/videos/{video_id}/file", methods=["GET", "HEAD"], tags=["Direct Downloads"])
 def download_direct_video_file(video_id: int):
     """Serves the downloaded video file to the user's browser for saving."""
     v = ytd.get_direct_video_by_id(video_id)

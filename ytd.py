@@ -606,6 +606,7 @@ def get_channel_videos(
         if active:
             v_dict["download_status"] = active.get("status", v_dict["download_status"])
             v_dict["download_progress"] = active.get("progress", v_dict["download_progress"])
+            v_dict["download_step"] = active.get("step")
             if active.get("error"):
                 v_dict["download_error"] = active.get("error")
 
@@ -631,6 +632,7 @@ def get_video_by_id(video_id: int) -> Optional[Dict[str, Any]]:
         if active:
             v_dict["download_status"] = active.get("status", v_dict["download_status"])
             v_dict["download_progress"] = active.get("progress", v_dict["download_progress"])
+            v_dict["download_step"] = active.get("step")
             if active.get("error"):
                 v_dict["download_error"] = active.get("error")
         return v_dict
@@ -733,7 +735,7 @@ def split_video_into_parts(
     zip_path = YTD_DOWNLOADS_DIR / f"{youtube_id}_parts.zip"
     zip_path.unlink(missing_ok=True)
 
-    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_STORED) as zf:
         for p in part_files:
             zf.write(str(p), arcname=p.name)
 
@@ -788,7 +790,7 @@ def generate_shorts_from_video(
     zip_path = YTD_DOWNLOADS_DIR / f"{youtube_id}_shorts.zip"
     zip_path.unlink(missing_ok=True)
 
-    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_STORED) as zf:
         for s in rendered_shorts:
             zf.write(str(s), arcname=s.name)
 
@@ -814,7 +816,8 @@ def process_video_download_task(
     yt_id = video["youtube_id"]
     yt_url = video["url"]
     raw_title = video["title"] or f"video_{yt_id}"
-    safe_title = re.sub(r'[/\\?%*:|"<>]+', '_', raw_title)[:80].strip() or "video"
+    safe_title = re.sub(r'[\r\n\t]+', ' ', raw_title)
+    safe_title = re.sub(r'[/\\?%*:|"<>]+', '_', safe_title)[:80].strip() or "video"
 
     active_ytd_downloads[video_id] = {
         "status": "downloading",
@@ -833,42 +836,59 @@ def process_video_download_task(
     raw_mp4_path = YTD_DOWNLOADS_DIR / f"{yt_id}.mp4"
 
     try:
-        # Step 1: Download highest quality 720p/1080p MP4
-        cmd = [
-            "yt-dlp",
-            "--ignore-config",
-            "--no-playlist",
-            "--no-progress",
-            "--newline",
-            "--progress",
-            "--socket-timeout", "30",
-            "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
-            "--merge-output-format", "mp4",
-        ] + get_ytdlp_auth_args() + [
-            "-o", str(raw_mp4_path),
-            "--",
-            yt_url
-        ]
+        # Check if source MP4 is already downloaded and valid on disk
+        reuse_existing = (
+            download_type in ["split", "splits", "shorts"] and
+            raw_mp4_path.exists() and
+            raw_mp4_path.stat().st_size > 1024
+        )
 
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        if proc.stdout:
-            for line in proc.stdout:
-                m = re.search(r"\[download\]\s+([\d.]+)%", line)
-                if m:
-                    pct = min(85, max(5, int(float(m.group(1)) * 0.85)))
-                    active_ytd_downloads[video_id] = {
-                        "status": "downloading",
-                        "progress": pct,
-                        "step": f"Downloading from YouTube ({m.group(1)}%)...",
-                        "error": None
-                    }
+        if not reuse_existing:
+            # Step 1: Download highest quality 720p/1080p MP4
+            cmd = [
+                "yt-dlp",
+                "--ignore-config",
+                "--no-playlist",
+                "--no-progress",
+                "--newline",
+                "--progress",
+                "--socket-timeout", "35",
+                "--force-overwrites",
+                "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+                "--merge-output-format", "mp4",
+            ] + get_ytdlp_auth_args() + [
+                "-o", str(raw_mp4_path),
+                "--",
+                yt_url
+            ]
 
-        proc.wait()
-        if proc.returncode != 0:
-            raise RuntimeError("yt-dlp exited with non-zero error during video download.")
+            last_error_msg = None
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            if proc.stdout:
+                for line in proc.stdout:
+                    if "ERROR:" in line:
+                        last_error_msg = line.replace("ERROR:", "").strip()
+                    elif "Sign in to confirm" in line:
+                        last_error_msg = "YouTube sign-in required. Please sync or upload cookies.txt."
+                    elif "HTTP Error 403" in line:
+                        last_error_msg = "HTTP 403 Forbidden. Session cookies may be expired. Please re-sync cookies."
 
-        if not raw_mp4_path.exists() or raw_mp4_path.stat().st_size == 0:
-            raise RuntimeError("Video download finished but MP4 file was not found on disk.")
+                    m = re.search(r"\[download\]\s+([\d.]+)%", line)
+                    if m:
+                        pct = min(85, max(5, int(float(m.group(1)) * 0.85)))
+                        active_ytd_downloads[video_id] = {
+                            "status": "downloading",
+                            "progress": pct,
+                            "step": f"Downloading from YouTube ({m.group(1)}%)...",
+                            "error": None
+                        }
+
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(last_error_msg or f"yt-dlp exited with error code {proc.returncode}")
+
+            if not raw_mp4_path.exists() or raw_mp4_path.stat().st_size == 0:
+                raise RuntimeError("Video download finished but MP4 file was not found on disk.")
 
         total_dur = float(video.get("duration") or 0)
         if total_dur <= 0:
@@ -1000,7 +1020,7 @@ def queue_video_download(
     if not video:
         raise KeyError("Video not found.")
 
-    if active_ytd_downloads.get(video_id, {}).get("status") in ["downloading", "processing"]:
+    if active_ytd_downloads.get(video_id, {}).get("status") in ["downloading", "processing", "queued"]:
         return {
             "status": "already_running",
             "video_id": video_id
@@ -1012,6 +1032,14 @@ def queue_video_download(
         "step": "Starting download task...",
         "error": None
     }
+
+    with get_db_connection() as conn:
+        conn.execute("""
+            UPDATE videos 
+            SET download_status = 'downloading', download_progress = 1, download_error = NULL
+            WHERE id = ?
+        """, (video_id,))
+        conn.commit()
 
     ytd_executor.submit(
         process_video_download_task,

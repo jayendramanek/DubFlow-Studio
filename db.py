@@ -8,9 +8,46 @@ import os
 import re
 import json
 import time
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+
+
+def get_system_storage(target_path: Optional[Path] = None) -> Dict[str, Any]:
+    """
+    Retrieves real-time disk storage metrics (available, used, total in GB).
+    """
+    try:
+        check_dir = str(target_path or Path(__file__).resolve().parent / "workspace_api")
+        if not os.path.exists(check_dir):
+            check_dir = "."
+        usage = shutil.disk_usage(check_dir)
+        total_gb = round(usage.total / (1024 ** 3), 1)
+        used_gb = round(usage.used / (1024 ** 3), 1)
+        free_gb = round(usage.free / (1024 ** 3), 1)
+        percent_used = round((usage.used / usage.total) * 100, 1) if usage.total > 0 else 0.0
+        return {
+            "total_gb": total_gb,
+            "used_gb": used_gb,
+            "free_gb": free_gb,
+            "available_gb": free_gb,
+            "percent": percent_used,
+            "percent_used": percent_used,
+            "percent_free": round(100.0 - percent_used, 1),
+            "display": f"{free_gb} GB / {total_gb} GB"
+        }
+    except Exception:
+        return {
+            "total_gb": 0.0,
+            "used_gb": 0.0,
+            "free_gb": 0.0,
+            "available_gb": 0.0,
+            "percent": 0.0,
+            "percent_used": 0.0,
+            "percent_free": 0.0,
+            "display": "N/A"
+        }
 
 
 def get_system_ram() -> Dict[str, Any]:
@@ -328,6 +365,7 @@ def estimate_job_duration_sec(job_dict: Dict[str, Any]) -> float:
 def get_system_stats(jobs_db: Dict[str, Any], videos_db: Dict[str, Any]) -> Dict[str, Any]:
     """Calculates live system RAM and statistics for dashboard widgets."""
     ram = get_system_ram()
+    storage = get_system_storage()
     now = time.time()
     total_videos = len(videos_db)
 
@@ -461,6 +499,7 @@ def get_system_stats(jobs_db: Dict[str, Any], videos_db: Dict[str, Any]) -> Dict
     return {
         "hardware": hardware,
         "ram": ram,
+        "storage": storage,
         "counts": {
             "total_videos": total_videos,
             "total_conversions": completed_jobs,

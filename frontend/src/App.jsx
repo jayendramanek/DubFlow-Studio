@@ -570,7 +570,6 @@ export default function App() {
   const [selectedChannelId, setSelectedChannelId] = useState(null);
   const [isAddChannelModalOpen, setIsAddChannelModalOpen] = useState(false);
   const [editingChannel, setEditingChannel] = useState(null);
-  const [downloadModalVideo, setDownloadModalVideo] = useState(null);
 
   // Direct YouTube Downloader state
   const [directVideos, setDirectVideos] = useState([]);
@@ -1098,6 +1097,26 @@ export default function App() {
             </div>
           </div>
 
+          {/* Mini Storage Status */}
+          {systemStats?.storage && (
+            <div className="p-3 rounded-xl bg-surface-850 border border-white/5 text-xs">
+              <div className="flex items-center justify-between text-slate-400 mb-1.5">
+                <span className="font-semibold text-slate-300">Disk Storage</span>
+                <span className="font-bold text-cyan-400">{systemStats?.storage?.percent_used || 0}%</span>
+              </div>
+              <div className="w-full bg-surface-900 rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="bg-gradient-to-r from-cyan-500 to-blue-500 h-1.5 rounded-full transition-all duration-500"
+                  style={{ width: `${systemStats?.storage?.percent_used || 0}%` }}
+                ></div>
+              </div>
+              <div className="flex justify-between items-center mt-2 text-[10px] text-slate-500">
+                <span className="text-cyan-400">{systemStats?.storage?.free_gb || 0} GB Free</span>
+                <span>{systemStats?.storage?.total_gb || 0} GB Total</span>
+              </div>
+            </div>
+          )}
+
           {/* User Profile Card */}
           <div className="flex items-center justify-between pt-2">
             <div className="flex items-center gap-2.5 overflow-hidden">
@@ -1133,7 +1152,21 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            {/* Storage Available / Full Badge */}
+            {systemStats?.storage && (
+              <div
+                className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 text-xs font-semibold shadow-sm"
+                title={`Available Storage: ${systemStats.storage.free_gb} GB / Full Storage: ${systemStats.storage.total_gb} GB (${systemStats.storage.percent_used}% used)`}
+              >
+                <HardDrive className="w-3.5 h-3.5 text-cyan-400 flex-shrink-0" />
+                <span>
+                  {systemStats.storage.free_gb} GB / {systemStats.storage.total_gb} GB Free
+                </span>
+              </div>
+            )}
+
+            {/* Hardware Acceleration Indicator Badge */}
             <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
               <span>{systemStats?.hardware?.engine_label || 'Acceleration Engine Active'}</span>
@@ -2071,9 +2104,9 @@ export default function App() {
             <YtdChannelDetailsView
               channelId={selectedChannelId}
               onBack={() => { setActiveTab("ytd"); setSelectedChannelId(null); fetchYtdChannels(); }}
-              onDownloadVideo={(video) => setDownloadModalVideo(video)}
               onDeleteVideo={handleDeleteYtdVideo}
               onSyncChannel={handleSyncChannel}
+              onRefreshStats={fetchYtdStats}
             />
           )}
 
@@ -2280,17 +2313,6 @@ export default function App() {
           onUpdated={() => {
             setEditingChannel(null);
             fetchYtdChannels();
-          }}
-        />
-      )}
-
-      {/* Download Video Modal (Full, Splits, Shorts) */}
-      {downloadModalVideo && (
-        <YtdDownloadModal
-          video={downloadModalVideo}
-          onClose={() => setDownloadModalVideo(null)}
-          onDownloadStarted={() => {
-            fetchYtdStats();
           }}
         />
       )}
@@ -2559,9 +2581,9 @@ function YtdChannelsView({
 function YtdChannelDetailsView({
   channelId,
   onBack,
-  onDownloadVideo,
   onDeleteVideo,
-  onSyncChannel
+  onSyncChannel,
+  onRefreshStats
 }) {
   const [channel, setChannel] = useState(null);
   const [videos, setVideos] = useState([]);
@@ -2569,6 +2591,7 @@ function YtdChannelDetailsView({
   const [isSyncing, setIsSyncing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [modalVideo, setModalVideo] = useState(null);
 
   const loadChannelAndVideos = async () => {
     try {
@@ -2594,9 +2617,11 @@ function YtdChannelDetailsView({
     loadChannelAndVideos();
   }, [channelId]);
 
+  const YTD_ACTIVE_STATUSES = ['queued', 'downloading', 'processing', 'splitting', 'generating_shorts'];
+
   // Polling for active background downloads
   useEffect(() => {
-    const hasActive = (videos || []).some(v => ['queued', 'downloading', 'splitting', 'generating_shorts'].includes(v.download_status));
+    const hasActive = (videos || []).some(v => YTD_ACTIVE_STATUSES.includes(v.download_status));
     if (!hasActive) return;
 
     const interval = setInterval(async () => {
@@ -2609,10 +2634,28 @@ function YtdChannelDetailsView({
       } catch (e) {
         console.error("Polling error:", e);
       }
-    }, 3000);
+    }, 2500);
 
     return () => clearInterval(interval);
   }, [channelId, videos]);
+
+  const handleDownloadStarted = async (startedVideoId) => {
+    // Optimistically show video as downloading immediately
+    setVideos(prev => prev.map(v => v.id === startedVideoId ? {
+      ...v,
+      download_status: 'downloading',
+      download_progress: 5,
+      download_step: 'Starting download task...'
+    } : v));
+    try {
+      const res = await fetch(`/api/ytd/channels/${channelId}/videos?limit=250`);
+      if (res.ok) {
+        const fresh = await res.json();
+        setVideos(Array.isArray(fresh) ? fresh : (fresh.videos || []));
+      }
+    } catch (e) {}
+    if (onRefreshStats) onRefreshStats();
+  };
 
   const handleManualSync = async () => {
     setIsSyncing(true);
@@ -2781,7 +2824,7 @@ function YtdChannelDetailsView({
       ) : (
         <div className="space-y-3">
           {filteredVideos.map((vid) => {
-            const isProcessing = ['queued', 'downloading', 'splitting', 'generating_shorts'].includes(vid.download_status);
+            const isProcessing = YTD_ACTIVE_STATUSES.includes(vid.download_status);
 
             return (
               <div
@@ -2831,9 +2874,20 @@ function YtdChannelDetailsView({
                 {/* Middle: Download Status Badge */}
                 <div className="flex items-center gap-3 lg:px-4">
                   {isProcessing ? (
-                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-semibold">
-                      <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
-                      <span className="capitalize">{vid.download_status.replace('_', ' ')}...</span>
+                    <div className="flex flex-col items-start lg:items-end">
+                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-semibold">
+                        <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+                        <span className="capitalize">
+                          {vid.download_status === 'processing'
+                            ? (vid.download_step || 'Processing...')
+                            : `${vid.download_status.replace('_', ' ')} (${vid.download_progress || 0}%)`}
+                        </span>
+                      </div>
+                      {vid.download_step && vid.download_status !== 'processing' && (
+                        <span className="text-[10px] text-slate-400 mt-0.5 truncate max-w-[220px]">
+                          {vid.download_step}
+                        </span>
+                      )}
                     </div>
                   ) : vid.is_downloaded ? (
                     <div className="flex flex-col items-start lg:items-end">
@@ -2842,9 +2896,21 @@ function YtdChannelDetailsView({
                         <span>Downloaded</span>
                       </span>
                       <span className="text-[10px] text-slate-400 mt-0.5 uppercase tracking-wider font-semibold">
-                        {vid.download_type === 'splits' ? 'Splits (ZIP)' : vid.download_type === 'shorts' ? 'Shorts (ZIP)' : 'Full MP4'}
+                        {['split', 'splits'].includes(vid.download_type) ? 'Splits (ZIP)' : vid.download_type === 'shorts' ? 'Shorts (ZIP)' : 'Full MP4'}
                         {vid.file_size_mb ? ` • ${vid.file_size_mb} MB` : ''}
                       </span>
+                    </div>
+                  ) : vid.download_status === 'error' || vid.download_error ? (
+                    <div className="flex flex-col items-start lg:items-end">
+                      <span className="px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold flex items-center gap-1" title={vid.download_error || "Download failed"}>
+                        <span>✕</span>
+                        <span>Failed</span>
+                      </span>
+                      {vid.download_error && (
+                        <span className="text-[10px] text-red-400/80 mt-0.5 truncate max-w-[220px]" title={vid.download_error}>
+                          {vid.download_error}
+                        </span>
+                      )}
                     </div>
                   ) : (
                     <span className="px-2.5 py-1 rounded-full bg-slate-800 text-slate-400 border border-white/5 text-xs font-medium">
@@ -2858,18 +2924,26 @@ function YtdChannelDetailsView({
                   <button
                     type="button"
                     disabled={isProcessing}
-                    onClick={() => onDownloadVideo(vid)}
-                    className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition shadow-sm ${vid.is_downloaded ? 'bg-surface-800 hover:bg-surface-700 text-slate-200 border border-white/10' : 'bg-red-600 hover:bg-red-500 text-white shadow-red-500/20'}`}
+                    onClick={() => setModalVideo(vid)}
+                    className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition shadow-sm ${
+                      isProcessing
+                        ? 'opacity-60 cursor-not-allowed bg-surface-800 text-slate-400 border border-white/5'
+                        : vid.is_downloaded
+                        ? 'bg-surface-800 hover:bg-surface-700 text-slate-200 border border-white/10'
+                        : vid.download_status === 'error'
+                        ? 'bg-amber-600 hover:bg-amber-500 text-white shadow-amber-500/20'
+                        : 'bg-red-600 hover:bg-red-500 text-white shadow-red-500/20'
+                    }`}
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>{vid.is_downloaded ? "Re-download" : "Download"}</span>
+                    <span>{isProcessing ? "Processing..." : vid.is_downloaded ? "Re-download" : vid.download_status === 'error' ? "Retry Download" : "Download"}</span>
                   </button>
 
                   {Boolean(vid.is_downloaded) && (
                     <a
                       href={`/api/ytd/videos/${vid.id}/file`}
                       download
-                      title="Save downloaded file to computer"
+                      title={`Save ${vid.download_type === 'split' ? 'Splits (ZIP)' : vid.download_type === 'shorts' ? 'Shorts (ZIP)' : 'Full MP4'} to computer`}
                       className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-semibold transition"
                     >
                       <Download className="w-3.5 h-3.5" />
@@ -2890,6 +2964,15 @@ function YtdChannelDetailsView({
             );
           })}
         </div>
+      )}
+
+      {/* Download Video Modal (Full, Splits, Shorts) */}
+      {modalVideo && (
+        <YtdDownloadModal
+          video={modalVideo}
+          onClose={() => setModalVideo(null)}
+          onDownloadStarted={(videoId) => handleDownloadStarted(videoId)}
+        />
       )}
     </div>
   );
@@ -3176,7 +3259,9 @@ function YtdDownloadModal({ video, onClose, onDownloadStarted }) {
       });
 
       if (res.ok) {
-        onDownloadStarted();
+        if (onDownloadStarted) {
+          onDownloadStarted(video.id);
+        }
         onClose();
       } else {
         const err = await res.json().catch(() => ({}));
