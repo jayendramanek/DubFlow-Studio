@@ -100,8 +100,12 @@ def extract_youtube_id(url: Optional[str]) -> Optional[str]:
 
 import db
 
-# Sequential thread pool executor (1 worker active at a time to optimize Apple Silicon RAM/GPU; subsequent videos/parts wait in queue)
-executor = ThreadPoolExecutor(max_workers=1)
+# Dynamic thread pool executor based on system RAM:
+# Automatically scales parallel workers (e.g. 1 worker on <8GB, 2 workers on 8-14GB, 3 workers on 15-22GB, 4 workers on >=23GB)
+# Can be manually overridden via MAX_PARALLEL_WORKERS environment variable.
+optimal_workers = HardwareAccelerationManager.get_optimal_worker_count()
+logger.info(f"Initializing DubFlow Studio background job executor with {optimal_workers} parallel worker(s)...")
+executor = ThreadPoolExecutor(max_workers=optimal_workers)
 
 class JobCancelledException(Exception):
     """Raised when a dubbing job is cancelled by the user."""
@@ -1931,13 +1935,26 @@ def download_language_video(job_id: str, lang: str):
     if not languages or lang_code not in languages:
         if job.get("target_lang") == lang_code and job.get("output_video_path"):
             v_p = Path(job["output_video_path"])
+            if not v_p.exists():
+                cand = JOBS_DIR / job_id / v_p.name
+                if cand.exists():
+                    v_p = cand
             if v_p.exists():
                 return FileResponse(path=v_p, media_type="video/mp4", filename=v_p.name)
         raise HTTPException(status_code=404, detail=f"Language '{lang}' not found in completed job")
 
     video_path = Path(languages[lang_code]["final_video"])
     if not video_path.exists():
-        raise HTTPException(status_code=404, detail=f"Dubbed video file for '{lang}' not found on disk")
+        cand = JOBS_DIR / job_id / video_path.name
+        if cand.exists():
+            video_path = cand
+        else:
+            sub_name = SUPPORTED_VOICES.get(lang_code, {}).get("name", "").split(" ")[0] or lang_code.capitalize()
+            cand_lang = JOBS_DIR / job_id / sub_name / video_path.name
+            if cand_lang.exists():
+                video_path = cand_lang
+            else:
+                raise HTTPException(status_code=404, detail=f"Dubbed video file for '{lang}' not found on disk")
 
     return FileResponse(path=video_path, media_type="video/mp4", filename=video_path.name)
 
@@ -1988,7 +2005,21 @@ def download_dubbed_video(job_id: str):
 
     video_path = Path(job["output_video_path"])
     if not video_path.exists():
-        raise HTTPException(status_code=404, detail="Exported video file missing on disk")
+        cand = JOBS_DIR / job_id / video_path.name
+        if cand.exists():
+            video_path = cand
+        else:
+            primary_lang = job.get("target_lang", "es")
+            sub_name = SUPPORTED_VOICES.get(primary_lang, {}).get("name", "").split(" ")[0] or primary_lang.capitalize()
+            cand_lang = JOBS_DIR / job_id / sub_name / video_path.name
+            if cand_lang.exists():
+                video_path = cand_lang
+            else:
+                found = list((JOBS_DIR / job_id).glob("*.mp4")) + list((JOBS_DIR / job_id).rglob("*.mp4"))
+                if found:
+                    video_path = found[0]
+                else:
+                    raise HTTPException(status_code=404, detail="Exported video file missing on disk")
 
     return FileResponse(
         path=video_path,

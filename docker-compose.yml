@@ -29,8 +29,8 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
-    # Optional resource limits suitable for 8 GB RAM VM (leaves buffer for host OS)
-    deploy:
-      resources:
-        limits:
-          memory: 7200M
+    # Optional resource limits (unrestricted so container can use full laptop RAM up to 24 GB)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 18000M

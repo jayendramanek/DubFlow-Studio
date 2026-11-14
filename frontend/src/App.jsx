@@ -409,6 +409,12 @@ function RamDonutChart({ ram = { percent: 0, used_gb: 0, free_gb: 0, total_gb: 0
           <span>Total Unified:</span>
           <span className="font-bold text-white">{ram.total_gb} GB</span>
         </div>
+        {ram?.parallel_workers && (
+          <div className="flex items-center justify-between text-indigo-400 px-1 text-[11px] font-semibold pt-1 border-t border-white/5">
+            <span>Parallel Capacity:</span>
+            <span className="font-bold text-indigo-300">⚡ {ram.parallel_workers}x Parts Parallel</span>
+          </div>
+        )}
         {onRefresh && (
           <button
             type="button"
@@ -1095,6 +1101,12 @@ export default function App() {
               <span>{systemStats?.ram?.used_gb || 0} GB Used</span>
               <span>{systemStats?.ram?.total_gb || 0} GB Total</span>
             </div>
+            {systemStats?.hardware?.parallel_workers && (
+              <div className="mt-1.5 pt-1.5 border-t border-white/5 flex items-center justify-between text-[10px]">
+                <span className="text-slate-400">Parallel Parts:</span>
+                <span className="font-bold text-indigo-400">⚡ {systemStats.hardware.parallel_workers}x at once</span>
+              </div>
+            )}
           </div>
 
           {/* Mini Storage Status */}

@@ -53,17 +53,49 @@ def get_system_storage(target_path: Optional[Path] = None) -> Dict[str, Any]:
 def get_system_ram() -> Dict[str, Any]:
     """
     Retrieves real-time system memory across Linux Cloud VMs, Docker, macOS, and Windows.
-    Uses /proc/meminfo on Linux, psutil if available, or sysctl/vm_stat on macOS.
+    Properly accounts for Docker container cgroup limits when running inside a container.
     """
+    cgroup_limit = None
+    cgroup_usage = None
+    for p in ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]:
+        path = Path(p)
+        if path.exists():
+            try:
+                val = path.read_text().strip()
+                if val != "max" and val.isdigit():
+                    cgroup_limit = int(val)
+                    break
+            except Exception:
+                pass
+    for p in ["/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"]:
+        path = Path(p)
+        if path.exists():
+            try:
+                val = path.read_text().strip()
+                if val.isdigit():
+                    cgroup_usage = int(val)
+                    break
+            except Exception:
+                pass
+
     # 1. Try psutil if installed
     try:
         import psutil
         vm = psutil.virtual_memory()
+        total_bytes = vm.total
+        used_bytes = vm.used
+        avail_bytes = vm.available
+
+        if cgroup_limit and cgroup_limit < total_bytes:
+            total_bytes = cgroup_limit
+            used_bytes = cgroup_usage if cgroup_usage else min(used_bytes, total_bytes)
+            avail_bytes = max(0, total_bytes - used_bytes)
+
         return {
-            "total_gb": round(vm.total / (1024 ** 3), 2),
-            "used_gb": round(vm.used / (1024 ** 3), 2),
-            "free_gb": round(vm.available / (1024 ** 3), 2),
-            "percent": round(vm.percent, 1)
+            "total_gb": round(total_bytes / (1024 ** 3), 2),
+            "used_gb": round(used_bytes / (1024 ** 3), 2),
+            "free_gb": round(avail_bytes / (1024 ** 3), 2),
+            "percent": round((used_bytes / total_bytes) * 100, 1) if total_bytes > 0 else 0.0,
         }
     except Exception:
         pass
@@ -495,6 +527,15 @@ def get_system_stats(jobs_db: Dict[str, Any], videos_db: Dict[str, Any]) -> Dict
             "cpu_cores": os.cpu_count() or 4,
             "os": platform.system()
         }
+
+    try:
+        from pipeline import HardwareAccelerationManager
+        parallel_workers = HardwareAccelerationManager.get_optimal_worker_count()
+    except Exception:
+        parallel_workers = 1
+
+    hardware["parallel_workers"] = parallel_workers
+    ram["parallel_workers"] = parallel_workers
 
     return {
         "hardware": hardware,

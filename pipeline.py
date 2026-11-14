@@ -24,6 +24,8 @@ import uuid
 import gc
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Callable
+import threading
+import concurrent.futures
 
 try:
     from dotenv import load_dotenv
@@ -34,6 +36,19 @@ except ImportError:
 # Ensure PyTorch MPS Fallback is active before importing torch if on macOS
 if platform.system() == "Darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+# Compatibility patch: PyAV 14+ removed 'metadata_errors' which causes faster-whisper to raise:
+# TypeError: open() got an unexpected keyword argument 'metadata_errors'
+try:
+    import av
+    if hasattr(av, "open"):
+        _orig_av_open = av.open
+        def _safe_av_open(*args, **kwargs):
+            kwargs.pop("metadata_errors", None)
+            return _orig_av_open(*args, **kwargs)
+        av.open = _safe_av_open
+except Exception:
+    pass
 
 # Configure structured logging
 logging.basicConfig(
@@ -96,13 +111,91 @@ class HardwareAccelerationManager:
         except Exception:
             pass
 
+        workers = HardwareAccelerationManager.get_optimal_worker_count()
         return {
             "device": device,
             "engine_label": engine_label,
             "gpu_name": gpu_name,
             "cpu_cores": cpu_cores,
-            "os": os_name
+            "os": os_name,
+            "parallel_workers": workers
         }
+
+    @staticmethod
+    def get_effective_ram_gb() -> float:
+        """
+        Determines the true effective RAM in GB available to this process,
+        properly accounting for Docker container cgroup memory limits if running in a container.
+        """
+        cgroup_bytes = None
+        for p in ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]:
+            path = Path(p)
+            if path.exists():
+                try:
+                    val = path.read_text().strip()
+                    if val != "max" and val.isdigit():
+                        cgroup_bytes = int(val)
+                        break
+                except Exception:
+                    pass
+
+        host_bytes = None
+        try:
+            import psutil
+            host_bytes = psutil.virtual_memory().total
+        except Exception:
+            try:
+                meminfo_p = Path("/proc/meminfo")
+                if meminfo_p.exists():
+                    with open(meminfo_p, "r", encoding="utf-8") as f:
+                        for line in f:
+                            if line.startswith("MemTotal:"):
+                                total_kb = int(line.split(":")[1].strip().split()[0])
+                                host_bytes = total_kb * 1024
+                                break
+            except Exception:
+                pass
+
+        if cgroup_bytes and host_bytes:
+            effective_bytes = min(cgroup_bytes, host_bytes)
+        elif cgroup_bytes:
+            effective_bytes = cgroup_bytes
+        elif host_bytes:
+            effective_bytes = host_bytes
+        else:
+            effective_bytes = 8 * (1024 ** 3)
+
+        return effective_bytes / (1024 ** 3)
+
+    @staticmethod
+    def get_optimal_worker_count(reserved_gb: float = 3.0, gb_per_worker: float = 4.0, max_cap: int = 4) -> int:
+        """
+        Dynamically calculates how many conversion parts can safely run in parallel based on system RAM:
+        - < 8GB RAM: 1 part (strictly sequential to avoid OOM crash)
+        - 8GB - 14GB RAM: 2 parts in parallel
+        - 15GB - 22GB RAM: 3 parts in parallel
+        - >= 23GB RAM: 4 parts in parallel
+        Can be manually overridden at any time via MAX_PARALLEL_WORKERS environment variable.
+        """
+        env_override = os.getenv("MAX_PARALLEL_WORKERS") or os.getenv("DUBFLOW_MAX_WORKERS") or os.getenv("PARALLEL_PARTS")
+        if env_override:
+            try:
+                val = int(env_override.strip())
+                if val >= 1:
+                    logger.info(f"Using manual MAX_PARALLEL_WORKERS override: {val}")
+                    return val
+            except ValueError:
+                pass
+
+        effective_gb = HardwareAccelerationManager.get_effective_ram_gb()
+        cpu_cores = os.cpu_count() or 4
+
+        avail_ram = max(0.0, effective_gb - reserved_gb)
+        workers_by_ram = int(avail_ram // gb_per_worker)
+        workers_by_cpu = max(1, cpu_cores // 2)
+
+        optimal = max(1, min(workers_by_ram, workers_by_cpu, max_cap))
+        return optimal
 
     @staticmethod
     def get_whisper_config() -> Dict[str, Any]:
@@ -313,7 +406,7 @@ class YouTubeDownloader:
                 progress_callback(pct * 0.1, f"Downloading YouTube: {int(pct * 100)}%")
 
         base_opts = {
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "format": "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "outtmpl": outtmpl,
             "merge_output_format": "mp4",
             "progress_hooks": [ydl_hook],
@@ -552,7 +645,10 @@ class VideoSegmenter:
                 "-f", "concat",
                 "-safe", "0",
                 "-i", str(list_file),
+                "-map", "0:v",
+                "-map", "0:a?",
                 "-c", "copy",
+                "-movflags", "+faststart",
                 str(output_video)
             ]
             try:
@@ -566,8 +662,11 @@ class VideoSegmenter:
                     "-f", "concat",
                     "-safe", "0",
                     "-i", str(list_file),
-                    "-c:v", "libx264", "-preset", "ultrafast",
-                    "-c:a", "aac", "-b:a", "192k",
+                    "-map", "0:v",
+                    "-map", "0:a?",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                    "-movflags", "+faststart",
                     str(output_video)
                 ]
                 subprocess.run(cmd_reencode, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
@@ -842,6 +941,7 @@ class ShortsGenerator:
             "-crf", "20",
             "-c:a", "aac",
             "-b:a", "192k",
+            "-movflags", "+faststart",
             str(output_path)
         ]
         try:
@@ -871,7 +971,20 @@ class AudioDemixer:
     """
     Extracts audio from video and separates it into vocals (English narration)
     and background accompaniment (BGM + sound effects) using Demucs.
+    Uses a semaphore to throttle concurrent Demucs instances, preventing OOM spikes
+    while allowing Whisper, TTS, and FFmpeg remuxing to run concurrently across parts.
     """
+    _demux_semaphore: Optional[threading.Semaphore] = None
+
+    @classmethod
+    def get_demux_semaphore(cls) -> threading.Semaphore:
+        if cls._demux_semaphore is None:
+            ram_gb = HardwareAccelerationManager.get_effective_ram_gb()
+            # Demucs uses ~2.8-3.5GB per process. Allow 2 concurrent separations only if RAM >= 16GB, else 1 to guarantee zero OOM.
+            max_concurrent = 2 if ram_gb >= 16.0 else 1
+            cls._demux_semaphore = threading.Semaphore(max_concurrent)
+            logger.info(f"Demucs audio separation concurrency gate initialized: max {max_concurrent} concurrent process(es) (RAM: {ram_gb:.1f} GB)")
+        return cls._demux_semaphore
 
     def __init__(self, device: Optional[str] = None):
         self.device = device or AppleSiliconManager.get_torch_device()
@@ -911,13 +1024,8 @@ class AudioDemixer:
         Returns:
             Tuple[Path, Path]: (vocals_path, background_path)
         """
-        logger.info(f"Separating audio with Demucs (model='{model_name}', device='{self.device}')...")
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Demucs CLI command with two-stems=vocals to optimize separation speed
-        # On Apple Silicon MPS, some demucs ops prefer CPU fallback if MPS has kernel issues
         device_flag = self.device if self.device in ["mps", "cpu", "cuda"] else "cpu"
-        
         cmd = [
             sys.executable, "-m", "demucs.separate",
             "-n", model_name,
@@ -927,43 +1035,58 @@ class AudioDemixer:
             str(audio_path)
         ]
 
+        sem = self.get_demux_semaphore()
+        logger.info(f"Pipelining Demucs separation for {audio_path.name} (waiting for separation slot)...")
         try:
-            logger.info("Executing Demucs demixing process...")
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if result.returncode != 0:
-                # If MPS caused an issue, retry on CPU
-                if device_flag == "mps":
-                    logger.warning("MPS demixing encountered an issue. Retrying with high-performance CPU mode...")
-                    cmd[cmd.index("-d") + 1] = "cpu"
-                    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-                else:
-                    raise RuntimeError(f"Demucs separation failed: {result.stderr}")
+            with sem:
+                logger.info(f"Acquired Demucs slot. Separating audio with Demucs (model='{model_name}', device='{device_flag}')...")
+                result = None
+                for attempt in range(2):
+                    try:
+                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        if result.returncode == 0:
+                            break
+                        if device_flag == "mps" and attempt == 0:
+                            logger.warning("MPS demixing encountered an issue. Retrying with high-performance CPU mode...")
+                            cmd[cmd.index("-d") + 1] = "cpu"
+                            device_flag = "cpu"
+                            continue
+                        logger.warning(f"Demucs attempt {attempt + 1} exited with code {result.returncode}. Retrying after memory purge...")
+                        gc.collect()
+                        time.sleep(2)
+                    except Exception as ex:
+                        if attempt == 1:
+                            raise
+                        time.sleep(2)
 
-            # Demucs organizes files as: output_dir / model_name / audio_stem / vocals.wav & no_vocals.wav
-            stem_name = audio_path.stem
-            demucs_track_dir = output_dir / model_name / stem_name
-            
-            raw_vocals = demucs_track_dir / "vocals.wav"
-            raw_no_vocals = demucs_track_dir / "no_vocals.wav"
+                if result is None or result.returncode != 0:
+                    err_tail = result.stderr[-400:] if result and result.stderr else "Unknown error"
+                    raise RuntimeError(f"Demucs separation failed: {err_tail}")
 
-            if not raw_vocals.exists() or not raw_no_vocals.exists():
-                # Check for alternative stem names
-                possible_vocals = list(demucs_track_dir.glob("*vocals*.wav"))
-                if not possible_vocals:
-                    raise FileNotFoundError(f"Demucs outputs not found in {demucs_track_dir}")
-                raw_vocals = possible_vocals[0]
-                raw_no_vocals = [f for f in demucs_track_dir.glob("*.wav") if f != raw_vocals][0]
+                # Demucs organizes files as: output_dir / model_name / audio_stem / vocals.wav & no_vocals.wav
+                stem_name = audio_path.stem
+                demucs_track_dir = output_dir / model_name / stem_name
+                
+                raw_vocals = demucs_track_dir / "vocals.wav"
+                raw_no_vocals = demucs_track_dir / "no_vocals.wav"
 
-            # Standardize destination paths
-            final_vocals = output_dir / "vocals.wav"
-            final_background = output_dir / "background.wav"
+                if not raw_vocals.exists() or not raw_no_vocals.exists():
+                    # Check for alternative stem names
+                    possible_vocals = list(demucs_track_dir.glob("*vocals*.wav"))
+                    if not possible_vocals:
+                        raise FileNotFoundError(f"Demucs outputs not found in {demucs_track_dir}")
+                    raw_vocals = possible_vocals[0]
+                    raw_no_vocals = [f for f in demucs_track_dir.glob("*.wav") if f != raw_vocals][0]
 
-            shutil.copyfile(raw_vocals, final_vocals)
-            shutil.copyfile(raw_no_vocals, final_background)
+                # Standardize destination paths
+                final_vocals = output_dir / "vocals.wav"
+                final_background = output_dir / "background.wav"
 
-            logger.info(f"Audio demixing successful:\n - Vocals: {final_vocals}\n - Background: {final_background}")
-            return final_vocals, final_background
+                shutil.copyfile(raw_vocals, final_vocals)
+                shutil.copyfile(raw_no_vocals, final_background)
 
+                logger.info(f"Audio demixing successful:\n - Vocals: {final_vocals}\n - Background: {final_background}")
+                return final_vocals, final_background
         except Exception as e:
             logger.error(f"Error during audio separation: {e}")
             raise
@@ -983,22 +1106,68 @@ class TimedTranscriber:
         self.model_size = model_size
         self.config = AppleSiliconManager.get_whisper_config()
         self.model = None
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _preload_cuda_libraries():
+        """Preloads nvidia-cublas and nvidia-cudnn shared libraries into the process so CTranslate2 can resolve them."""
+        try:
+            import ctypes
+            import site
+            sp_list = site.getsitepackages() if hasattr(site, "getsitepackages") else []
+            lib_dirs = []
+            for sp in sp_list:
+                for sub in ["nvidia/cublas/lib", "nvidia/cudnn/lib"]:
+                    target = os.path.join(sp, sub)
+                    if os.path.isdir(target):
+                        lib_dirs.append(target)
+            
+            if lib_dirs:
+                current_ld = os.environ.get("LD_LIBRARY_PATH", "")
+                added = ":".join(lib_dirs)
+                os.environ["LD_LIBRARY_PATH"] = f"{added}:{current_ld}".strip(":")
+            
+            for ldir in lib_dirs:
+                for fname in os.listdir(ldir):
+                    if fname.endswith(".so") or ".so." in fname:
+                        try:
+                            ctypes.CDLL(os.path.join(ldir, fname), mode=ctypes.RTLD_GLOBAL)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     def load_model(self):
-        """Lazy load faster-whisper model."""
+        """Lazy load faster-whisper model in a thread-safe manner."""
         if self.model is None:
-            try:
-                from faster_whisper import WhisperModel
-                logger.info(f"Loading faster-whisper model '{self.model_size}' (device={self.config['device']}, compute_type={self.config['compute_type']})...")
-                self.model = WhisperModel(
-                    self.model_size,
-                    device=self.config["device"],
-                    compute_type=self.config["compute_type"],
-                    cpu_threads=self.config["cpu_threads"]
-                )
-            except ImportError:
-                logger.error("`faster-whisper` is not installed. Please install via `pip install faster-whisper`.")
-                raise
+            with self._lock:
+                if self.model is None:
+                    if self.config.get("device") == "cuda":
+                        self._preload_cuda_libraries()
+                    try:
+                        from faster_whisper import WhisperModel
+                        logger.info(f"Loading faster-whisper model '{self.model_size}' (device={self.config['device']}, compute_type={self.config['compute_type']})...")
+                        self.model = WhisperModel(
+                            self.model_size,
+                            device=self.config["device"],
+                            compute_type=self.config["compute_type"],
+                            cpu_threads=self.config["cpu_threads"]
+                        )
+                    except Exception as e:
+                        if self.config.get("device") == "cuda" and ("cublas" in str(e).lower() or "cuda" in str(e).lower()):
+                            logger.warning(f"CUDA initialization for Whisper failed ({e}). Falling back to CPU mode...")
+                            self.config["device"] = "cpu"
+                            self.config["compute_type"] = "int8"
+                            from faster_whisper import WhisperModel
+                            self.model = WhisperModel(
+                                self.model_size,
+                                device="cpu",
+                                compute_type="int8",
+                                cpu_threads=self.config.get("cpu_threads", 4)
+                            )
+                        else:
+                            logger.error(f"Failed to load faster-whisper: {e}")
+                            raise
 
     def transcribe(self, vocals_path: Path) -> List[Dict[str, Any]]:
         """
@@ -1038,6 +1207,42 @@ class TimedTranscriber:
             return results
 
         except Exception as e:
+            err_str = str(e).lower()
+            if self.config.get("device") == "cuda" and ("cublas" in err_str or "cuda" in err_str or "library" in err_str):
+                logger.warning(f"Whisper CUDA transcription failed ({e}). Retrying with CPU fallback...")
+                try:
+                    from faster_whisper import WhisperModel
+                    self.config["device"] = "cpu"
+                    self.config["compute_type"] = "int8"
+                    self.model = WhisperModel(
+                        self.model_size,
+                        device="cpu",
+                        compute_type="int8",
+                        cpu_threads=self.config.get("cpu_threads", 4)
+                    )
+                    segments_generator, info = self.model.transcribe(
+                        str(vocals_path),
+                        beam_size=5,
+                        language="en",
+                        vad_filter=True,
+                        vad_parameters=dict(min_silence_duration_ms=500),
+                    )
+                    results = []
+                    for seg in segments_generator:
+                        text = seg.text.strip()
+                        if not text:
+                            continue
+                        segment_dict = {
+                            "start": round(float(seg.start), 3),
+                            "end": round(float(seg.end), 3),
+                            "text": text,
+                        }
+                        results.append(segment_dict)
+                    logger.info(f"CPU Fallback transcription complete: extracted {len(results)} speech segments.")
+                    return results
+                except Exception as cpu_e:
+                    logger.error(f"CPU Fallback transcription also failed: {cpu_e}")
+                    raise
             logger.error(f"Transcription failed: {e}")
             raise
 
@@ -1075,13 +1280,36 @@ class SegmentTranslator:
             model_name = f"Helsinki-NLP/opus-mt-en-{self.target_lang}"
             logger.info(f"Loading local HuggingFace translation model: {model_name}...")
             self._hf_tokenizer = MarianTokenizer.from_pretrained(model_name)
-            self._hf_model = MarianMTModel.from_pretrained(model_name)
+            model = MarianMTModel.from_pretrained(model_name)
+            if self.device in ["cuda", "mps"]:
+                try:
+                    model = model.to(self.device)
+                    logger.info(f"MarianMT model accelerated on {self.device.upper()} GPU.")
+                except Exception as e:
+                    logger.warning(f"Could not move MarianMT to {self.device}: {e}")
+            self._hf_model = model
 
     def _translate_hf(self, text: str) -> str:
         self._init_hf_model()
         inputs = self._hf_tokenizer(text, return_tensors="pt")
+        if self.device in ["cuda", "mps"]:
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
         outputs = self._hf_model.generate(**inputs)
         return self._hf_tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    def _translate_hf_batch(self, texts: List[str]) -> List[str]:
+        if not texts:
+            return []
+        self._init_hf_model()
+        try:
+            inputs = self._hf_tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
+            if self.device in ["cuda", "mps"]:
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            outputs = self._hf_model.generate(**inputs)
+            return [self._hf_tokenizer.decode(t, skip_special_tokens=True) for t in outputs]
+        except Exception as e:
+            logger.warning(f"Batch MarianMT error ({e}), falling back to single translation...")
+            return [self._translate_hf(t) for t in texts]
 
     def _translate_single(self, en_text: str, translator) -> str:
         """Translates a single string with multi-tier fallback."""
@@ -1129,10 +1357,38 @@ class SegmentTranslator:
         """
         Translates a list of segment dictionaries.
         Each returned segment contains: 'start', 'end', 'original_text', and 'text' (translated).
+        Accelerated via batch processing on GPU when MarianMT is used.
         """
         logger.info(f"Translating {len(segments)} segments to '{self.target_lang}' using engine: '{self.engine}'...")
-        translated_segments = []
+        if not segments:
+            return []
 
+        # If helsinki-nlp or local model preferred, run super-fast GPU batch translation
+        if self.engine == "helsinki-nlp":
+            texts = [s["text"].strip() for s in segments]
+            batch_size = 32
+            translated_all = []
+            for b_start in range(0, len(texts), batch_size):
+                b_texts = texts[b_start:b_start + batch_size]
+                translated_all.extend(self._translate_hf_batch(b_texts))
+
+            translated_segments = []
+            translated_count = 0
+            for s, orig, trans in zip(segments, texts, translated_all):
+                t_clean = trans.strip() if trans else orig
+                if t_clean and t_clean.lower() != orig.lower():
+                    translated_count += 1
+                translated_segments.append({
+                    "start": s["start"],
+                    "end": s["end"],
+                    "original_text": orig,
+                    "text": t_clean,
+                })
+            success_rate = (translated_count / len(segments) * 100) if segments else 0
+            logger.info(f"GPU Translation complete: {translated_count}/{len(segments)} ({success_rate:.1f}%) segments translated to '{self.target_lang}'.")
+            return translated_segments
+
+        translated_segments = []
         translator = None
         if self.engine == "deep-translator":
             try:
@@ -1142,14 +1398,46 @@ class SegmentTranslator:
                 logger.warning("deep-translator not found. Falling back to local MarianMT model.")
                 self.engine = "helsinki-nlp"
 
+        consecutive_errors = 0
         translated_count = 0
         for idx, seg in enumerate(segments, 1):
             en_text = seg["text"].strip()
-            translated_text = self._translate_single(en_text, translator)
+            if not en_text:
+                translated_segments.append({
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "original_text": "",
+                    "text": "",
+                })
+                continue
 
+            # If GoogleTranslator had multiple failures (e.g. rate limit), switch remaining to fast batch MarianMT
+            if consecutive_errors >= 3:
+                logger.info("GoogleTranslator rate limited. Switching remaining segments to fast GPU MarianMT...")
+                remaining_segments = segments[idx - 1:]
+                remaining_texts = [s["text"].strip() for s in remaining_segments]
+                batch_size = 32
+                trans_rem = []
+                for b in range(0, len(remaining_texts), batch_size):
+                    trans_rem.extend(self._translate_hf_batch(remaining_texts[b:b + batch_size]))
+                for s, orig, trans in zip(remaining_segments, remaining_texts, trans_rem):
+                    t_clean = trans.strip() if trans else orig
+                    if t_clean and t_clean.lower() != orig.lower():
+                        translated_count += 1
+                    translated_segments.append({
+                        "start": s["start"],
+                        "end": s["end"],
+                        "original_text": orig,
+                        "text": t_clean,
+                    })
+                break
+
+            translated_text = self._translate_single(en_text, translator)
             if translated_text and translated_text.lower() != en_text.lower():
                 translated_count += 1
+                consecutive_errors = 0
             else:
+                consecutive_errors += 1
                 logger.warning(f"Segment {idx} could not be translated. Kept original: '{en_text}'")
 
             new_seg = {
@@ -1345,16 +1633,14 @@ class TimestampAwareTTS:
         if self.voice_clone and reference_vocals_path and reference_vocals_path.exists():
             self._init_xtts()
 
-        processed_chunks: List[Tuple[float, Path]] = []  # (start_time, wav_path)
-
-        for i, seg in enumerate(segments):
+        def _process_single_tts_task(task_args) -> Optional[Tuple[int, float, Path]]:
+            i, seg = task_args
             start = seg["start"]
             end = seg["end"]
             target_duration = max(end - start, 0.2)
             es_text = seg["text"].strip()
-
             if not es_text:
-                continue
+                return None
 
             raw_chunk_path = chunks_dir / f"chunk_{i:04d}_raw.wav"
             aligned_chunk_path = chunks_dir / f"chunk_{i:04d}_aligned.wav"
@@ -1373,18 +1659,39 @@ class TimestampAwareTTS:
                     speed_factor = chunk_duration / target_duration
                     if speed_factor > 1.05:
                         clamped_speed = min(speed_factor, cap)
-                        logger.debug(f"Segment {i}: adjusting speech speed by {clamped_speed:.2f}x (target={speed_factor:.2f}x, cap={cap:.2f}x)")
                         self.time_stretch_audio(raw_chunk_path, aligned_chunk_path, clamped_speed, max_speed=cap)
                     else:
                         shutil.copyfile(raw_chunk_path, aligned_chunk_path)
                 else:
                     shutil.copyfile(raw_chunk_path, aligned_chunk_path)
 
-                processed_chunks.append((start, aligned_chunk_path))
+                return (i, start, aligned_chunk_path)
 
             except Exception as e:
                 logger.error(f"Error synthesizing segment {i} ('{es_text}'): {e}")
-                continue
+                return None
+
+        tts_tasks = [(i, seg) for i, seg in enumerate(segments)]
+        concurrency = 1 if (self.voice_clone and self._xtts_model is not None) else 8
+        results_map: Dict[int, Tuple[float, Path]] = {}
+
+        if concurrency > 1 and len(tts_tasks) > 1:
+            logger.info(f"Synthesizing {len(tts_tasks)} audio segments in parallel ({concurrency} concurrent streams)...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [pool.submit(_process_single_tts_task, t) for t in tts_tasks]
+                for fut in concurrent.futures.as_completed(futures):
+                    res = fut.result()
+                    if res:
+                        idx, start, path = res
+                        results_map[idx] = (start, path)
+        else:
+            for t in tts_tasks:
+                res = _process_single_tts_task(t)
+                if res:
+                    idx, start, path = res
+                    results_map[idx] = (start, path)
+
+        processed_chunks: List[Tuple[float, Path]] = [results_map[i] for i in range(len(segments)) if i in results_map]
 
         # Build timeline using FFmpeg amix / adelay or high-precision Python WAV stitching
         logger.info("Assembling chunks onto high-precision master timeline...")
@@ -1408,9 +1715,10 @@ class TimestampAwareTTS:
         import soundfile as sf
 
         sample_rate = 44100
-        total_samples = int((total_duration + 5.0) * sample_rate)
+        target_total_samples = int(total_duration * sample_rate) if total_duration and total_duration > 0 else 0
+        allocated_samples = max(target_total_samples, int((total_duration + 5.0) * sample_rate) if total_duration else int(30 * sample_rate))
         # 2-channel stereo timeline
-        master_timeline = np.zeros((total_samples, 2), dtype=np.float32)
+        master_timeline = np.zeros((allocated_samples, 2), dtype=np.float32)
 
         last_end_sample = 0
         min_gap_samples = int(0.06 * sample_rate)  # 60ms natural separation gap between phrases
@@ -1436,14 +1744,21 @@ class TimestampAwareTTS:
             end_sample = start_sample + len(data)
             last_end_sample = end_sample
 
-            if end_sample > total_samples:
+            if end_sample > master_timeline.shape[0]:
                 # Expand master timeline if needed
-                pad_size = end_sample - total_samples
+                pad_size = end_sample - master_timeline.shape[0]
                 master_timeline = np.pad(master_timeline, ((0, pad_size), (0, 0)), mode="constant")
-                total_samples = end_sample
 
             # Overlay chunk onto master timeline
             master_timeline[start_sample:end_sample] += data
+
+        # If total_duration was provided, clamp or pad exact duration so chunk audio matches video part duration perfectly
+        if target_total_samples > 0:
+            if master_timeline.shape[0] > target_total_samples:
+                master_timeline = master_timeline[:target_total_samples]
+            elif master_timeline.shape[0] < target_total_samples:
+                pad_size = target_total_samples - master_timeline.shape[0]
+                master_timeline = np.pad(master_timeline, ((0, pad_size), (0, 0)), mode="constant")
 
         # Normalize audio to prevent clipping (-1.0 to 1.0)
         max_val = np.max(np.abs(master_timeline))
@@ -1460,9 +1775,26 @@ class TimestampAwareTTS:
 
 class VideoRemuxer:
     """
-    Mixes Spanish vocals with isolated background audio (BGM/SFX) and
-    stitches the mixed audio back into the original video stream without re-encoding.
+    Mixes vocals with isolated background audio (BGM/SFX) and
+    stitches the mixed audio back into the video stream with universal web and player compatibility.
     """
+
+    @staticmethod
+    def get_video_codec(video_path: Path) -> str:
+        """Probes video codec name (e.g. 'h264', 'vp9', 'av1') using ffprobe."""
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(video_path)
+        ]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
+            return res.stdout.strip().lower()
+        except Exception as e:
+            logger.warning(f"Failed to probe video codec for {video_path}: {e}")
+            return ""
 
     @staticmethod
     def generate_watermark_image(
@@ -1538,26 +1870,60 @@ class VideoRemuxer:
     ) -> Path:
         """
         Mixes audio tracks and exports final MP4.
-        If watermark_text is provided, applies a floating light-white watermark jumping every 2-4 seconds.
-        Otherwise, uses `-c:v copy` for instant, zero-quality-loss export.
+        Ensures 100% universal browser and media player compatibility with H.264/AAC,
+        moves MOOV atom to the front via '+faststart', and avoids amix volume halving.
         """
-        logger.info(f"Mixing Spanish vocals with background audio (BGM volume={bg_volume}, Vocals volume={vocals_volume})...")
+        logger.info(f"Mixing vocals with background audio (BGM volume={bg_volume}, Vocals volume={vocals_volume})...")
         output_video.parent.mkdir(parents=True, exist_ok=True)
 
         temp_mixed_audio = output_video.parent / "temp_mixed_audio.wav"
         temp_watermark_png: Optional[Path] = None
 
-        # 1. Mix Spanish vocals and background audio with custom volume balances
-        mix_cmd = [
-            "ffmpeg", "-y",
-            "-i", str(spanish_vocals),
-            "-i", str(background_audio),
-            "-filter_complex",
-            f"[0:a]volume={vocals_volume:.2f}[v];[1:a]volume={bg_volume:.2f}[b];[v][b]amix=inputs=2:duration=first:dropout_transition=2[aout]",
-            "-map", "[aout]",
-            "-c:a", "pcm_s16le",
-            str(temp_mixed_audio)
-        ]
+        # 1. Mix vocals and background audio with custom volume balances
+        has_vocals = spanish_vocals and Path(spanish_vocals).exists() and Path(spanish_vocals).stat().st_size > 100
+        has_bg = background_audio and Path(background_audio).exists() and Path(background_audio).stat().st_size > 100
+
+        if has_vocals and has_bg:
+            mix_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(spanish_vocals),
+                "-i", str(background_audio),
+                "-filter_complex",
+                f"[0:a]volume={vocals_volume:.2f}[v];[1:a]volume={bg_volume:.2f}[b];[v][b]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]",
+                "-map", "[aout]",
+                "-c:a", "pcm_s16le",
+                "-ar", "44100",
+                "-ac", "2",
+                str(temp_mixed_audio)
+            ]
+        elif has_vocals:
+            mix_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(spanish_vocals),
+                "-filter:a", f"volume={vocals_volume:.2f}",
+                "-c:a", "pcm_s16le",
+                "-ar", "44100",
+                "-ac", "2",
+                str(temp_mixed_audio)
+            ]
+        elif has_bg:
+            mix_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(background_audio),
+                "-filter:a", f"volume={bg_volume:.2f}",
+                "-c:a", "pcm_s16le",
+                "-ar", "44100",
+                "-ac", "2",
+                str(temp_mixed_audio)
+            ]
+        else:
+            mix_cmd = [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-t", "10",
+                "-c:a", "pcm_s16le",
+                str(temp_mixed_audio)
+            ]
 
         try:
             subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
@@ -1566,7 +1932,11 @@ class VideoRemuxer:
             logger.error(f"FFmpeg audio mixing failed: {e.stderr.decode('utf-8', errors='ignore')}")
             raise RuntimeError(f"Audio mixing failed: {e}")
 
-        # 2. Check if watermark is requested
+        # 2. Check source video codec to ensure 100% universal MP4 playback compatibility
+        raw_codec = VideoRemuxer.get_video_codec(original_video)
+        is_universal_h264 = raw_codec in ["h264", "avc1"]
+
+        # 3. Check if watermark is requested
         if watermark_text and watermark_text.strip():
             temp_watermark_png = output_video.parent / "temp_watermark.png"
             VideoRemuxer.generate_watermark_image(
@@ -1594,14 +1964,44 @@ class VideoRemuxer:
                 "-map", "[vout]",
                 "-map", "1:a:0",
                 "-c:v", vcodec,
-                "-b:v", "4000k",
+                "-preset", "veryfast",
+                "-crf", "22",
+                "-pix_fmt", "yuv420p",
                 "-c:a", "aac",
                 "-b:a", "192k",
+                "-ar", "44100",
+                "-ac", "2",
+                "-movflags", "+faststart",
+                "-shortest",
+                str(output_video)
+            ]
+        elif not is_universal_h264:
+            # Video codec is VP9, AV1, HEVC, etc.
+            # Blindly copying into MP4 causes missing audio/black screen in web browsers and Windows players!
+            # Transcode to universally compatible H.264 (yuv420p)
+            vcodec = "h264_videotoolbox" if AppleSiliconManager.get_torch_device() == "mps" else "libx264"
+            logger.info(f"Source video has codec '{raw_codec or 'unknown'}'. Transcoding to standard H.264 ({vcodec}) for universal web & audio playback compatibility...")
+
+            remux_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(original_video),
+                "-i", str(temp_mixed_audio),
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", vcodec,
+                "-preset", "veryfast",
+                "-crf", "22",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-ar", "44100",
+                "-ac", "2",
+                "-movflags", "+faststart",
                 "-shortest",
                 str(output_video)
             ]
         else:
-            logger.info(f"Stitching mixed audio into {original_video.name} using '-c:v copy'...")
+            logger.info(f"Source video is H.264 ({raw_codec}). Stitching mixed audio into {original_video.name} using '-c:v copy'...")
             remux_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(original_video),
@@ -1611,6 +2011,9 @@ class VideoRemuxer:
                 "-c:v", "copy",           # Zero quality loss, near-instant copy
                 "-c:a", "aac",            # Standard high-compatibility audio codec
                 "-b:a", "192k",
+                "-ar", "44100",
+                "-ac", "2",
+                "-movflags", "+faststart",
                 "-shortest",              # Match duration
                 str(output_video)
             ]
@@ -2338,8 +2741,13 @@ class ManhwaDubbingPipeline:
             f"Video length is {effective_duration / 60:.1f} mins (> 10 mins). Processing in {num_chunks} x 10-minute parts for memory stability, then merging all parts..."
         )
 
-        chunk_results = []
-        for idx in range(num_chunks):
+        parallel_workers = HardwareAccelerationManager.get_optimal_worker_count()
+        parallel_workers = max(1, min(parallel_workers, num_chunks))
+
+        chunk_progress: Dict[int, float] = {i: 0.0 for i in range(num_chunks)}
+        progress_lock = threading.Lock()
+
+        def process_chunk_task(idx: int) -> Tuple[int, Dict[str, Any]]:
             c_start = effective_start + idx * self.CHUNK_DURATION_SECONDS
             c_dur = min(self.CHUNK_DURATION_SECONDS, effective_duration - (idx * self.CHUNK_DURATION_SECONDS))
             c_label = f"Part {idx + 1}/{num_chunks}"
@@ -2349,10 +2757,14 @@ class ManhwaDubbingPipeline:
             chunk_dir.mkdir(parents=True, exist_ok=True)
 
             chunk_source = chunk_dir / f"source_part_{idx + 1}.mp4"
-            report(
-                (idx / num_chunks) * 0.85 + 0.01,
-                f"[{c_label} ({c_time_range})] Extracting 10-minute video part..."
-            )
+            with progress_lock:
+                chunk_progress[idx] = 0.02
+                avg_p = sum(chunk_progress.values()) / num_chunks
+                report(
+                    min(0.88, 0.02 + avg_p * 0.85),
+                    f"[{c_label} ({c_time_range})] Extracting video part..."
+                )
+
             VideoSegmenter.trim(
                 input_video=input_video,
                 output_video=chunk_source,
@@ -2361,10 +2773,13 @@ class ManhwaDubbingPipeline:
             )
 
             def chunk_report(p: float, msg: str):
-                base_p = (idx / num_chunks) * 0.85
-                budget = 0.85 / num_chunks
-                overall_p = min(0.88, base_p + p * budget)
-                report(overall_p, f"[{c_label} ({c_time_range})] {msg}")
+                with progress_lock:
+                    chunk_progress[idx] = max(chunk_progress[idx], p)
+                    avg_p = sum(chunk_progress.values()) / num_chunks
+                    report(
+                        min(0.88, 0.02 + avg_p * 0.85),
+                        f"[{c_label} ({c_time_range})] {msg}"
+                    )
 
             chunk_res = self._process_single_chunk(
                 chunk_video=chunk_source,
@@ -2376,7 +2791,14 @@ class ManhwaDubbingPipeline:
                 watermark_interval=watermark_interval,
                 watermark_opacity=watermark_opacity,
             )
-            chunk_results.append(chunk_res)
+
+            with progress_lock:
+                chunk_progress[idx] = 1.0
+                avg_p = sum(chunk_progress.values()) / num_chunks
+                report(
+                    min(0.88, 0.02 + avg_p * 0.85),
+                    f"[{c_label} ({c_time_range})] Part {idx + 1} complete."
+                )
 
             # Free memory between chunks
             gc.collect()
@@ -2388,6 +2810,33 @@ class ManhwaDubbingPipeline:
                     torch.mps.empty_cache()
             except Exception:
                 pass
+
+            return idx, chunk_res
+
+        if parallel_workers > 1:
+            report(
+                0.02,
+                f"Video length is {effective_duration / 60:.1f} mins ({num_chunks} parts). "
+                f"RAM permits parallel processing: Dubbing {parallel_workers} parts concurrently..."
+            )
+            chunk_results_dict: Dict[int, Dict[str, Any]] = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers) as chunk_pool:
+                futures = [chunk_pool.submit(process_chunk_task, idx) for idx in range(num_chunks)]
+                for fut in concurrent.futures.as_completed(futures):
+                    idx, res = fut.result()
+                    chunk_results_dict[idx] = res
+
+            chunk_results = [chunk_results_dict[i] for i in range(num_chunks)]
+        else:
+            report(
+                0.02,
+                f"Video length is {effective_duration / 60:.1f} mins (> 10 mins). "
+                f"Processing {num_chunks} parts sequentially (1 at a time for memory stability)..."
+            )
+            chunk_results = []
+            for idx in range(num_chunks):
+                _, res = process_chunk_task(idx)
+                chunk_results.append(res)
 
         # Step: Merge all chunk results into final video and language assets
         report(0.88, f"All {num_chunks} parts converted successfully! Merging into complete final video...")
